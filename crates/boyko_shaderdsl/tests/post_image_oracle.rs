@@ -45,8 +45,9 @@ use post_f64::{
 const W: u32 = 64;
 /// The bound's safety factor `k`.
 const K: f64 = 4.0;
-/// The tonemapper words (bits 8..11): ACES, Neutral, Reinhard-Jodie and an unknown 7 (→ ACES).
-const MODES: [u32; 4] = [0, 1, 2, 7];
+/// The tonemapper words (bits 8..11): ACES, Neutral, Reinhard-Jodie, AgX (render wave PXt) and an
+/// unknown 7 (→ ACES).
+const MODES: [u32; 5] = [0, 1, 2, 3, 7];
 /// The exposure ratios: the identity and one each side.
 const RATIOS: [f32; 3] = [1.0, 0.5, 2.0];
 

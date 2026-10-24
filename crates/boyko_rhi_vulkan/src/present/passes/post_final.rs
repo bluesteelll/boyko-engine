@@ -46,23 +46,29 @@ impl Renderer<'_> {
             .post_final
             .as_ref()
             .expect("invariant: GBufferTargets::create builds the post_final ring or fails");
+        // Render wave PXt (OPEN-ITEMS 19): the module this frame's mode word selects — the RCAS
+        // module under the sharpen bit, the sharpen-off module otherwise.
+        let pipeline = scene.post_final.pipeline_for(scene.post_rcas());
         let zone = super::zone_arm::ZoneArm::from_scene(scene);
         // SAFETY: recording is open, outside any rendering scope (this fn's contract); the path
         // recorder's witness reset this frame's pool and seals the slot after this body.
         let zone_pair = unsafe { zone.begin(self.fns, cmd, ZONE_POST_FINAL) };
-        // SAFETY: recording is open (this fn's contract); `scene.post_final.pipeline` and the
-        // layout its set was written against are live on this device for the frame;
-        // `ring.set[fi]` binds this frame's scene input @0, `display` @1 and `ring.ubo[fi]` @2, all
-        // live for the frame, in the layouts the caller's graph barriers left; the shader reads
-        // no push constant (its 4-byte range is declared, never pushed);
+        // SAFETY: recording is open (this fn's contract); `pipeline` (either of
+        // `scene.post_final`'s two pipelines, both live on this device for the frame) and the set
+        // layout `ring.set[fi]` was written against (`scene.post_final.layout`) are live; both
+        // pipelines' layouts were built from that one set layout with the same 4-byte COMPUTE push
+        // range, so the set is compatible with whichever is bound here and is bound through that
+        // pipeline's own layout; `ring.set[fi]` binds this frame's scene input @0, `display` @1 and
+        // `ring.ubo[fi]` @2, all live for the frame, in the layouts the caller's graph barriers
+        // left; the shader reads no push constant (its 4-byte range is declared, never pushed);
         // `&ring.set[fi].descriptor_set` is a single element alive for the call; the group counts
         // cover `display_extent` with `8 × 8` tiles and the shader's guard drops the overhang.
         unsafe {
-            (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, scene.post_final.pipeline.pipeline);
+            (self.fns.cmd_bind_pipeline)(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
             (self.fns.cmd_bind_descriptor_sets)(
                 cmd,
                 VK_PIPELINE_BIND_POINT_COMPUTE,
-                scene.post_final.pipeline.layout,
+                pipeline.layout,
                 0,
                 1,
                 &ring.set[fi].descriptor_set,

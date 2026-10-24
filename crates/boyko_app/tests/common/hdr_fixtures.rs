@@ -16,9 +16,12 @@ use std::path::Path;
 use boyko_app::prelude::*;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_macros::Resource;
+use boyko_render::light::LightingConfig;
+use boyko_render::post::ResolvedPost;
 use boyko_render::{AaConfig, AaMode, GeometryLegs, Material, RenderPath, RenderPathConfig, SsaoConfig, SsaoQuality};
+use boyko_rhi_vulkan::present::LIT_BACKGROUND_SCENE;
 use boyko_shaderdsl::cf::HostTex2;
-use boyko_shaderdsl::post::{eval_params, post_final_eval};
+use boyko_shaderdsl::post::{TONEMAP_MODE_MASK, TONEMAP_MODE_SHIFT, eval_params, post_final_eval, ubo_word};
 
 use super::graph_receipt::{Receipt, fresh_out, run_worker};
 use super::image_dump::{DumpFile, files_of};
@@ -35,12 +38,20 @@ pub const WIN: u32 = 256;
 pub const SETTLE: u32 = 30;
 /// The hot radiance.
 pub const HOT_R: f32 = 2.0;
-/// The constant background every constant branch DISPLAYS — the display-referred value the three
-/// sites (`FORWARD_LIT_CLEAR`, `forward_sky`'s fallback, Deferred's no-SkyLight arm) stored before
-/// render wave PX1a. Since PX1a they store the scene-linear `LIT_BACKGROUND_SCENE`, whose
-/// `post_final` display is this value's 8-bit conversion (`boyko_rhi_vulkan/tests/hdr_fixtures.rs`,
-/// test 5), so the constant regions are read from `display`.
-pub const BACKGROUND: [f32; 3] = [0.05, 0.05, 0.1];
+/// The constant every constant branch STORES — the scene-linear radiance the three sites
+/// (`FORWARD_LIT_CLEAR`, `forward_sky`'s fallback, Deferred's no-SkyLight arm) write since render
+/// wave PX1a (`boyko_rhi_vulkan::present::LIT_BACKGROUND_SCENE`; binary16-exact, so `lit` holds it
+/// bit for bit — `boyko_rhi_vulkan/tests/hdr_fixtures.rs`, test 5). Before PX1a they stored the
+/// display-referred `(0.05, 0.05, 0.1)`. A constant region shows this radiance's `post_final`
+/// display under the run's own words ([`display8`]), so it follows whichever curve the run used.
+pub const BACKGROUND_SCENE: [f32; 3] = LIT_BACKGROUND_SCENE;
+/// How far a region texel may sit from the traced body's display of its radiance, in 8-bit codes.
+/// The device's float → UNORM conversion returns either integer nearest its value (Vulkan
+/// Fundamentals, "Conversion from Floating-Point to Normalized Fixed-Point"; triage r1 F3: the
+/// RTX 3060 writes `25.5000004` as 25), and that value is within half a code of
+/// [`post_final_eval`]'s (the transcendental tolerance), so the code is within one of the oracle's
+/// rounded code; two codes off is a different radiance.
+pub const DISPLAY_LSB: u8 = 1;
 
 // ===============================================================================================
 // The fixture table
@@ -49,7 +60,8 @@ pub const BACKGROUND: [f32; 3] = [0.05, 0.05, 0.1];
 /// What a region must show.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Expect {
-    /// Exactly this constant's 8-bit value.
+    /// This scene-linear constant's `post_final` display under the run's words ([`display8`]),
+    /// within [`DISPLAY_LSB`].
     Constant([f32; 3]),
     /// A producer: these receipt keys hold these values, and the region is no constant.
     Producer(&'static [(&'static str, u64)]),
@@ -111,12 +123,12 @@ pub const FIXTURES: [Fixture; 15] = {
     [
         fx("deferred_surface", Deferred, Mesh, Centre, Expect::Producer(&[("path", 0), ("mesh_leg", 1)]), Hot::Emissive),
         Fixture { sky: true, ..fx("deferred_sky", Deferred, Mesh, TopLeft, Expect::Producer(&[("path", 0), ("light_sky", 1)]), Hot::Sky) },
-        fx("deferred_base", Deferred, Mesh, TopLeft, Expect::Constant(BACKGROUND), Hot::None),
+        fx("deferred_base", Deferred, Mesh, TopLeft, Expect::Constant(BACKGROUND_SCENE), Hot::None),
         fx("forward_opaque", Forward, Mesh, Centre, Expect::Producer(&[("path_is_forward", 1), ("path_is_forward_plus", 0)]), Hot::Emissive),
         fx("forward_opaque_froxel", ForwardPlus, Mesh, Centre, Expect::Producer(&[("path_is_forward_plus", 1)]), Hot::Emissive),
         Fixture { sky: true, ..fx("forward_sky", Forward, Mesh, TopLeft, Expect::Producer(&[("path_is_forward", 1), ("light_sky", 1)]), Hot::Sky) },
-        fx("forward_sky_base", Forward, Mesh, TopLeft, Expect::Constant(BACKGROUND), Hot::None),
-        fx("forward_lit_clear", Forward, Sdf, TopLeft, Expect::Constant(BACKGROUND), Hot::None),
+        fx("forward_sky_base", Forward, Mesh, TopLeft, Expect::Constant(BACKGROUND_SCENE), Hot::None),
+        fx("forward_lit_clear", Forward, Sdf, TopLeft, Expect::Constant(BACKGROUND_SCENE), Hot::None),
         Fixture { sky: true, ..fx("vb_sky", VisibilityBuffer, Mesh, TopLeft, Expect::Producer(&[("path_is_vb", 1), ("light_sky", 1)]), Hot::Sky) },
         fx("sdf_forward_march_forward", Forward, Both, Centre, Expect::Producer(&[("path_is_forward", 1), ("path_has_sdf_forward", 1)]), Hot::Emissive),
         fx("sdf_forward_march_vb", VisibilityBuffer, Sdf, Centre, Expect::Producer(&[("path_is_vb", 1), ("path_has_sdf_forward", 1)]), Hot::Emissive),
@@ -131,35 +143,46 @@ pub fn fixture(name: &str) -> &'static Fixture {
     FIXTURES.iter().find(|f| f.name == name).unwrap_or_else(|| panic!("{ENV_FIXTURE}={name} names no fixture"))
 }
 
-/// The 8-bit codes the RGBA8 `lit` store may write for a linear constant, per channel `(lo, hi)`.
-///
-/// Vulkan's float → UNORM conversion (Fundamentals, "Conversion from Floating-Point to Normalized
-/// Fixed-Point") returns ONE OF the two integers nearest `f · 255` — it "should" round to nearest,
-/// it must return the integer when the product is one — so the oracle is that pair, not a rounding
-/// mode (triage r1 F3: the RTX 3060 writes blue `0.1 · 255 = 25.5000004` as 25). The product is
-/// taken in f64, where it is exact for an f32 `f`; `lo == hi` exactly when it is integral.
-pub fn constant8(c: [f32; 3]) -> [(u8, u8); 3] {
-    c.map(|v| {
-        let r = f64::from(v.clamp(0.0, 1.0)) * 255.0;
-        (r.floor() as u8, r.ceil() as u8)
-    })
+/// The `post_final` words a fixture frame read: its receipt's `[config]` `post_word0..7`
+/// (`boyko_render::post_final_words` — one conversion with the bytes the frame uploaded).
+pub fn receipt_post_words(r: &Receipt) -> [u32; 8] {
+    core::array::from_fn(|i| u32::try_from(r.config(&format!("post_word{i}"))).expect("invariant: a 32-bit post word"))
 }
 
-/// `p` is a texel the UNORM conversion of the constant `c` may produce ([`constant8`]).
-pub fn admits(c: [f32; 3], p: [u8; 3]) -> bool {
-    constant8(c).iter().zip(p).all(|(&(lo, hi), v)| (lo..=hi).contains(&v))
+/// The `post_final` words of the engine's default configuration at a 1×1 extent —
+/// `LightingConfig::default()`, so `Tonemapper::default()`, exposure ratio 1, sharpen off: what a
+/// fixture frame reads (no fixture inserts a `LightingConfig`), for the host checks, which have no
+/// run.
+pub fn default_post_words() -> [u32; 8] {
+    let post = ResolvedPost::from_config(&LightingConfig::default());
+    boyko_render::post_final_words(&boyko_app::post_host::post_final_gpu(&post, [1, 1]))
 }
 
-/// `quantize8(post_final_eval(r))` — the hot region's oracle: the traced body over a one-texel
-/// scene of radiance `r`, ACES Hill (mode 0), exposure ratio 1.
-pub fn hot8(r: f32) -> [u8; 3] {
-    let mut words = [0u32; 8];
-    words[boyko_shaderdsl::post::ubo_word("exposure_ratio")] = 1.0f32.to_bits();
-    words[boyko_shaderdsl::post::ubo_word("extent")] = 1;
-    words[boyko_shaderdsl::post::ubo_word("extent") + 1] = 1;
-    let texel = [[r, r, r, 1.0]];
+/// The tonemapper field of `words`' mode word.
+pub fn tonemap_word(words: &[u32; 8]) -> u32 {
+    (words[ubo_word("mode_words")] >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK
+}
+
+/// `quantize8(post_final_eval(rgb))` under `words` — the traced body over a one-texel scene of
+/// radiance `rgb`. The extent words are set to that texel; every other word, the curve included,
+/// is `words`'.
+pub fn display8(mut words: [u32; 8], rgb: [f32; 3]) -> [u8; 3] {
+    words[ubo_word("extent")] = 1;
+    words[ubo_word("extent") + 1] = 1;
+    let texel = [[rgb[0], rgb[1], rgb[2], 1.0]];
     let o = post_final_eval([0, 0], &eval_params(words), HostTex2::new(&texel, 1, 1));
     [o[0], o[1], o[2]].map(|v| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8)
+}
+
+/// The hot region's oracle: [`display8`] of the uniform radiance `r` under `words`.
+pub fn hot8(words: [u32; 8], r: f32) -> [u8; 3] {
+    display8(words, [r; 3])
+}
+
+/// `p` is a texel the display of the oracle's `want` may produce: every channel within
+/// [`DISPLAY_LSB`].
+pub fn displays(want: [u8; 3], p: [u8; 3]) -> bool {
+    want.iter().zip(p).all(|(&w, v)| w.abs_diff(v) <= DISPLAY_LSB)
 }
 
 // ===============================================================================================

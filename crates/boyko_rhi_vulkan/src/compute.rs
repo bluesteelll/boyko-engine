@@ -513,9 +513,22 @@ embed_spirv! {
     /// RCAS over the border-clamped cross — four more fetches of the same image, in FSR 2's
     /// reversible space, at the `sharpness` word's `con` → the selected tonemap → the gamma OETF,
     /// stored to `display`. Three bindings (`POST_FINAL_BINDINGS`: `gScene` @0, `gDisplay` @1, the
-    /// 32-byte `PostFinal` UBO @2), `numthreads(8, 8, 1)`.
+    /// 32-byte `PostFinal` UBO @2), `numthreads(8, 8, 1)`. Since render wave PXt a frame binds it only
+    /// when its mode word SETS the sharpen bit; [`POST_FINAL_NOSHARPEN_COMP_SPV`] serves the rest.
     POST_FINAL_COMP_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/post_final.comp.spv")
+}
+
+embed_spirv! {
+    /// Render wave PXt (OPEN-ITEMS 19): `post_final`'s sharpen-OFF module
+    /// (`shaders/post_final_nosharpen.comp.hlsl`, GENERATED WHOLE from the same traced body with the
+    /// mode word masked by `~POST_MODE_SHARPEN`, so DXC folds the RCAS branch away: one fetch of the
+    /// scene input, then `hdr_sanitize` → the exposure ratio → the selected tonemap → the gamma
+    /// OETF). The same three bindings and `numthreads(8, 8, 1)`, so one set layout and one per-FIF set
+    /// ring serve both modules. `tests/post_edsl_sync.rs` byte-gates both files and
+    /// `tests/post_final_occupancy.rs` holds it to the `NoRcas` register twin.
+    POST_FINAL_NOSHARPEN_COMP_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/post_final_nosharpen.comp.spv")
 }
 
 embed_spirv! {
@@ -1752,10 +1765,27 @@ pub fn taa_resolve_spirv() -> &'static [u32] {
 
 /// Render wave PX1a: the `post_final` SPIR-V (see [`POST_FINAL_COMP_SPV`]), bound at boot by
 /// `boyko_app::gpu_scene::GpuSceneBundles::boot` into the `post_final` pipeline and dispatched by
-/// `Renderer::record_post_final` on every frame.
+/// `Renderer::record_post_final` on every frame whose mode word sets the sharpen bit (render wave
+/// PXt: [`post_final_spirv_for`] picks [`post_final_nosharpen_spirv`] otherwise).
 #[inline]
 pub fn post_final_spirv() -> &'static [u32] {
     POST_FINAL_COMP_SPV.as_words()
+}
+
+/// Render wave PXt (OPEN-ITEMS 19): the `post_final` sharpen-off SPIR-V (see
+/// [`POST_FINAL_NOSHARPEN_COMP_SPV`]).
+#[inline]
+pub fn post_final_nosharpen_spirv() -> &'static [u32] {
+    POST_FINAL_NOSHARPEN_COMP_SPV.as_words()
+}
+
+/// Render wave PXt (OPEN-ITEMS 19): the `post_final` module a frame binds, chosen by its mode word's
+/// `POST_MODE_SHARPEN` bit (`sharpen`): the RCAS module ([`post_final_spirv`]) when it is set, the
+/// sharpen-off module ([`post_final_nosharpen_spirv`]) when it is clear — so a frame without the
+/// sharpen pays none of RCAS's registers. `GpuSceneBundles::boot` builds a pipeline from each.
+#[inline]
+pub fn post_final_spirv_for(sharpen: bool) -> &'static [u32] {
+    if sharpen { post_final_spirv() } else { post_final_nosharpen_spirv() }
 }
 
 /// The SDFDDGI I3 DDGI resolve-sample GPU-GOLDEN SPIR-V as a `u32` word stream, ready for

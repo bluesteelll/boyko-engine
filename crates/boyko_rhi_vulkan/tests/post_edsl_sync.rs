@@ -7,11 +7,15 @@
 //! 2. **`.spv` byte identity** under the frozen recipe its header pins (a `SKIP` line when no `dxc`
 //!    resolves is NOT a pass).
 //! 3. **SPIR-V censuses** (`spirv-dis` of the committed module): exactly three `GLSL.std.450 Pow`
-//!    whose exponent is the `OETF_GAMMA_EXP` constant and no `Exp2`/`Log2` (the OETF cannot be
-//!    rewritten into `exp2(y·log2 x)`; RCAS's strength is a host-computed `con`, so the pixel adds
-//!    no transcendental); the RCAS stage and the tonemapper dispatch are REAL branches (three
-//!    `DontFlatten` selection merges, no `float3` `OpSelect` anywhere — the leaves are per-channel
-//!    scalar code, so a `v3float` select can only come from an if-converted branch); exactly five
+//!    whose exponent is the `OETF_GAMMA_EXP` constant, and (render wave PXt) three on AgX's
+//!    `AGX_LINEARIZE_EXP` and three `Log2` — six `Pow` in all — and no `Exp2` (the OETF and AgX's
+//!    `^2.2` cannot be rewritten into `exp2(y·log2 x)`; RCAS's strength is a host-computed `con`); the
+//!    RCAS stage and the three-level tonemapper dispatch are REAL branches (four `DontFlatten`
+//!    selection merges, no `float3` `OpSelect` anywhere — the leaves are per-channel scalar code, so
+//!    a `v3float` select can only come from an if-converted branch); AgX's six transcendentals sit
+//!    inside the dispatch selection that opens after the sharpen selection, so only word 3 issues
+//!    them, and each `Log2` reads a `max` against AgX's `1e-10` floor (`pxt/cut.md` D-T6, critique
+//!    W2: the floor is unobservable in any host value, so its presence is held here); exactly five
 //!    `OpImageFetch` — the scene texel once, before the sharpen selection, and RCAS's four ring taps
 //!    INSIDE it (render wave PX1b D-R10 (2): the sharpen-off path fetches once); the declared
 //!    bindings and the UBO member offsets are the tables'.
@@ -28,14 +32,20 @@
 //!    non-test caller of the traced body re-implements a stage (H2 test 10, armed by CONTENT, not
 //!    by a path PX0 might not use). Every census here is also run against fixtures it must reject,
 //!    every run, so none is vacuous.
+//! 7. **Render wave PXt — the sharpen-off module** (`post_final_nosharpen.comp`, OPEN-ITEMS 19): the
+//!    same generator sync, recipe pin and `.spv` byte gate; its censuses — the same six `Pow` and
+//!    three `Log2`, AgX's inside the dispatch (here the FIRST `DontFlatten` selection) on the floor's
+//!    `max`, three `DontFlatten` merges (the dispatch only: DXC folded the sharpen stage), exactly
+//!    ONE `OpImageFetch`, before every selection — the bindings the table declares, the stage trace
+//!    and the skeleton census.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use boyko_shaderdsl::post::{
-    OETF_GAMMA_EXP, POST_FINAL_BINDINGS, POST_FINAL_STAGE_ORDER, POST_FINAL_UBO_LAYOUT,
-    PostBindingKind, PostUboKind,
+    AGX_LINEARIZE_EXP, AGX_LOG_FLOOR, OETF_GAMMA_EXP, POST_FINAL_BINDINGS, POST_FINAL_STAGE_ORDER,
+    POST_FINAL_UBO_LAYOUT, PostBindingKind, PostUboKind,
 };
 
 /// The committed shader's stem.
@@ -116,11 +126,16 @@ fn skeleton_code(src: &str) -> String {
 
 /// The disassembly of the committed `.spv`, or `None` (with a SKIP line) when no `spirv-dis`.
 fn disassembly(test: &str) -> Option<String> {
+    disassembly_of(STEM, test)
+}
+
+/// The disassembly of the committed `<stem>.spv`, or `None` (with a SKIP line) when no `spirv-dis`.
+fn disassembly_of(stem: &str, test: &str) -> Option<String> {
     let Some(spirv_dis) = find_tool("spirv-dis") else {
         eprintln!("SKIP {test}: no spirv-dis on this host");
         return None;
     };
-    let spv = shaders_dir().join(format!("{STEM}.spv"));
+    let spv = shaders_dir().join(format!("{stem}.spv"));
     let out = Command::new(&spirv_dis)
         .arg(&spv)
         .output_within(DXC_DEADLINE)
@@ -199,16 +214,21 @@ fn token_lines(dis: &str) -> Vec<Vec<&str>> {
     dis.lines().map(|l| l.split_whitespace().collect()).collect()
 }
 
-/// `(pows on the gamma constant, all Pow, Exp2, Log2)` of a disassembly: a `Pow` counts as an OETF
-/// pow when its exponent operand is an `OpConstant %float` whose value IS `OETF_GAMMA_EXP`.
-fn pow_census(dis: &str) -> (usize, usize, usize, usize) {
-    let lines = token_lines(dis);
-    let gamma_ids: Vec<&str> = lines
+/// The result ids of a disassembly's `OpConstant %float` whose value IS `value`.
+fn float_constant_ids<'a>(lines: &[Vec<&'a str>], value: f32) -> Vec<&'a str> {
+    lines
         .iter()
         .filter(|t| t.len() == 5 && t[1] == "=" && t[2] == "OpConstant" && t[3] == "%float")
-        .filter(|t| t[4].parse::<f32>().is_ok_and(|v| v.to_bits() == OETF_GAMMA_EXP.to_bits()))
+        .filter(|t| t[4].parse::<f32>().is_ok_and(|v| v.to_bits() == value.to_bits()))
         .map(|t| t[0])
-        .collect();
+        .collect()
+}
+
+/// `(pows on the exponent constant, all Pow, Exp2, Log2)` of a disassembly: a `Pow` counts toward
+/// the first number when its exponent operand is an `OpConstant %float` whose value IS `exponent`.
+fn pow_census(dis: &str, exponent: f32) -> (usize, usize, usize, usize) {
+    let lines = token_lines(dis);
+    let gamma_ids = float_constant_ids(&lines, exponent);
     let mut gamma_pows = 0;
     let mut pows = 0;
     let mut exp2 = 0;
@@ -234,9 +254,16 @@ fn pow_census(dis: &str) -> (usize, usize, usize, usize) {
 #[test]
 fn oetf_is_three_pow_on_the_gamma_constant() {
     let Some(dis) = disassembly("oetf_is_three_pow_on_the_gamma_constant") else { return };
-    let (gamma_pows, pows, exp2, log2) = pow_census(&dis);
+    let (gamma_pows, pows, exp2, log2) = pow_census(&dis, OETF_GAMMA_EXP);
     assert_eq!(gamma_pows, 3, "the OETF must be exactly three GLSL.std.450 Pow on OETF_GAMMA_EXP (one per channel); {pows} Pow in all");
-    assert_eq!((exp2, log2), (0, 0), "no Exp2 / Log2 may appear at PXe (an OETF rewritten through exp2(y·log2 x) is red)");
+    let (agx_pows, _, _, _) = pow_census(&dis, AGX_LINEARIZE_EXP);
+    assert_eq!(agx_pows, 3, "AgX's linearisation must be exactly three GLSL.std.450 Pow on AGX_LINEARIZE_EXP (render wave PXt)");
+    assert_eq!(pows, 6, "post_final carries six Pow: the OETF's three and AgX's three");
+    assert_eq!(
+        (exp2, log2),
+        (0, 3),
+        "no Exp2 may appear, and the only Log2 are AgX's three (a pow rewritten through exp2(y·log2 x) is red)"
+    );
 }
 
 /// `(DontFlatten selection merges, v3float OpSelects)` of a disassembly.
@@ -255,8 +282,8 @@ fn tonemap_dispatch_is_a_real_branch() {
     let Some(dis) = disassembly("tonemap_dispatch_is_a_real_branch") else { return };
     let (dont_flatten, v3_selects) = branch_census(&dis);
     assert_eq!(
-        dont_flatten, 3,
-        "the RCAS stage and the two-level tonemapper dispatch must be three DontFlatten selections (`[branch]`)"
+        dont_flatten, 4,
+        "the RCAS stage and the three-level tonemapper dispatch (render wave PXt) must be four DontFlatten selections (`[branch]`)"
     );
     assert_eq!(v3_selects, 0, "a float3 OpSelect means a branch was if-converted (every arm evaluated per pixel)");
 }
@@ -291,6 +318,70 @@ fn check_fetch_structure(dis: &str) -> Result<(), String> {
 fn the_cross_is_fetched_inside_the_sharpen_branch() {
     let Some(dis) = disassembly("the_cross_is_fetched_inside_the_sharpen_branch") else { return };
     if let Err(why) = check_fetch_structure(&dis) {
+        panic!("{why}");
+    }
+}
+
+/// Render wave PXt (`pxt/cut.md` D-T6; critique W2) — `Err(why)` unless every `Log2` and every `Pow`
+/// on `AGX_LINEARIZE_EXP` lies inside the tonemapper dispatch — the second `DontFlatten` selection,
+/// which opens after the sharpen selection's merge label, or the first when the module has no
+/// sharpen stage (`after_sharpen == false`, the sharpen-off module) — between its
+/// `OpSelectionMerge` and its merge label, so only the dispatch issues AgX's transcendentals and
+/// none runs before it; and every `Log2` reads an `NMax` / `FMax` of which one operand is the
+/// `AGX_LOG_FLOOR` constant.
+fn check_agx_placement(dis: &str, after_sharpen: bool) -> Result<(), String> {
+    let lines = token_lines(dis);
+    let floor_ids = float_constant_ids(&lines, AGX_LOG_FLOOR);
+    let exp_ids = float_constant_ids(&lines, AGX_LINEARIZE_EXP);
+    let is_header = |t: &Vec<&str>| t.first() == Some(&"OpSelectionMerge") && t.last() == Some(&"DontFlatten");
+    let label_of = |merge: &str| lines.iter().position(|t| t.len() == 3 && t[0] == merge && t[1] == "=" && t[2] == "OpLabel");
+    let search_from = if after_sharpen {
+        let sharpen = lines.iter().position(is_header).ok_or("no DontFlatten selection: the sharpen stage is not a real branch")?;
+        label_of(lines[sharpen][1]).ok_or("the sharpen selection has no merge label")?
+    } else {
+        0
+    };
+    let dispatch = (search_from..lines.len())
+        .find(|&i| is_header(&lines[i]))
+        .ok_or("no DontFlatten selection after the sharpen stage: the tonemapper dispatch is not a real branch")?;
+    let dispatch_end = label_of(lines[dispatch][1]).ok_or("the dispatch selection has no merge label")?;
+    let ext = |t: &Vec<&str>, inst: &str| t.len() >= 7 && t[1] == "=" && t[2] == "OpExtInst" && t[5] == inst;
+    let mut seen = 0;
+    for (i, t) in lines.iter().enumerate() {
+        let agx_pow = ext(t, "Pow") && t.last().is_some_and(|e| exp_ids.contains(e));
+        let log2 = ext(t, "Log2");
+        if !(agx_pow || log2) {
+            continue;
+        }
+        seen += 1;
+        if !(dispatch < i && i < dispatch_end) {
+            return Err(format!("`{}` (line {i}) lies outside the tonemapper dispatch selection (lines {dispatch}..{dispatch_end}): AgX's transcendentals would run on every pixel", t.join(" ")));
+        }
+        if log2 {
+            let operand = t[6];
+            let floored = lines.iter().any(|d| {
+                d.len() >= 8
+                    && d[0] == operand
+                    && d[1] == "="
+                    && d[2] == "OpExtInst"
+                    && (d[5] == "NMax" || d[5] == "FMax")
+                    && d[6..].iter().any(|o| floor_ids.contains(o))
+            });
+            if !floored {
+                return Err(format!("`{}` (line {i}) does not read a max against AGX_LOG_FLOOR: log2(0) may reach the polynomial", t.join(" ")));
+            }
+        }
+    }
+    if seen == 0 {
+        return Err("no Log2 and no Pow on AGX_LINEARIZE_EXP: the AgX arm is not in the module, the census is vacuous".to_string());
+    }
+    Ok(())
+}
+
+#[test]
+fn agx_transcendentals_sit_inside_the_dispatch() {
+    let Some(dis) = disassembly("agx_transcendentals_sit_inside_the_dispatch") else { return };
+    if let Err(why) = check_agx_placement(&dis, true) {
         panic!("{why}");
     }
 }
@@ -819,8 +910,158 @@ fn the_censuses_reject_their_fixtures() {
          %22 = OpExtInst %float %1 Pow %12 %7\n%23 = OpSelect %v3float %c %a %b\n\
          OpSelectionMerge %30 DontFlatten\nOpSelectionMerge %31 None\n"
     );
-    assert_eq!(pow_census(&dis), (2, 3, 0, 0), "a Pow on another exponent is not an OETF pow");
+    assert_eq!(pow_census(&dis, gamma), (2, 3, 0, 0), "a Pow on another exponent is not an OETF pow");
+    assert_eq!(pow_census(&dis, 2.4).0, 1, "the exponent census counts the Pow on its own constant only");
     assert_eq!(branch_census(&dis), (1, 1), "the branch census must see the DontFlatten and the float3 select");
+    // Render wave PXt — the AgX placement census: AgX's Log2 (reading a max against the floor) and
+    // its Pow on 2.2 inside the second DontFlatten selection pass; a Log2 or a Pow before the
+    // dispatch, a Log2 without the floor and a module without either are each red.
+    let consts = format!("%f = OpConstant %float {AGX_LOG_FLOOR:e}\n%e = OpConstant %float {AGX_LINEARIZE_EXP}\n%g = OpConstant %float 0.5\n");
+    let sharpen = "OpSelectionMerge %90 DontFlatten\nOpBranchConditional %s %91 %90\n%91 = OpLabel\nOpBranch %90\n%90 = OpLabel\n";
+    let arm = "%40 = OpExtInst %float %1 NMax %39 %f\n%41 = OpExtInst %float %1 Log2 %40\n%42 = OpExtInst %float %1 Pow %43 %e\n";
+    let dispatch = |body: &str| format!("OpSelectionMerge %95 DontFlatten\nOpBranchConditional %t %93 %94\n%93 = OpLabel\n{body}OpBranch %95\n%94 = OpLabel\nOpBranch %95\n%95 = OpLabel\n");
+    assert_eq!(check_agx_placement(&format!("{consts}{sharpen}{}", dispatch(arm)), true), Ok(()));
+    assert!(check_agx_placement(&format!("{consts}{arm}{sharpen}{}", dispatch("")), true).is_err(), "a Log2 before the sharpen stage must be red");
+    assert!(check_agx_placement(&format!("{consts}{sharpen}{arm}{}", dispatch("")), true).is_err(), "a Log2 between the sharpen stage and the dispatch must be red");
+    let unfloored = arm.replace("NMax %39 %f", "NMax %39 %g");
+    assert!(check_agx_placement(&format!("{consts}{sharpen}{}", dispatch(&unfloored)), true).is_err(), "a Log2 without the 1e-10 floor must be red");
+    assert!(check_agx_placement(&format!("{consts}{sharpen}{}", dispatch("")), true).is_err(), "a module without AgX's transcendentals must be red");
+    // The sharpen-off module: the dispatch is the first selection.
+    assert_eq!(check_agx_placement(&format!("{consts}{}", dispatch(arm)), false), Ok(()));
+    assert!(check_agx_placement(&format!("{consts}{arm}{}", dispatch("")), false).is_err(), "a Log2 before the sharpen-off dispatch must be red");
+    // The sharpen-off fetch census: one fetch before every selection passes; a ring tap (a second
+    // fetch) or a fetch inside a selection is red.
+    let one = format!("{}{}", fetch(1), dispatch(""));
+    assert_eq!(check_nosharpen_fetches(&one), Ok(()));
+    assert!(check_nosharpen_fetches(&format!("{}{}{}", fetch(1), fetch(2), dispatch(""))).is_err(), "a second fetch must be red");
+    assert!(check_nosharpen_fetches(&dispatch(&fetch(1))).is_err(), "a fetch inside a selection must be red");
+}
+
+// ---- 7. Render wave PXt — the sharpen-off module (OPEN-ITEMS 19) ------------------------------------
+
+/// The committed sharpen-off module's stem.
+const NOSHARPEN_STEM: &str = "post_final_nosharpen.comp";
+
+/// `Err(why)` unless the module carries exactly ONE `OpImageFetch` (the scene texel), before every
+/// `DontFlatten` selection — the sharpen-off module, whose RCAS branch DXC folded away.
+fn check_nosharpen_fetches(dis: &str) -> Result<(), String> {
+    let lines = token_lines(dis);
+    let fetches: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.len() >= 3 && t[1] == "=" && t[2] == "OpImageFetch")
+        .map(|(i, _)| i)
+        .collect();
+    let first_selection = lines.iter().position(|t| t.first() == Some(&"OpSelectionMerge") && t.last() == Some(&"DontFlatten"));
+    match (fetches.as_slice(), first_selection) {
+        ([f], Some(s)) if *f < s => Ok(()),
+        ([f], None) => Err(format!("one OpImageFetch (line {f}) but no DontFlatten selection: the tonemapper dispatch is not a real branch")),
+        (f, _) => Err(format!("OpImageFetch at lines {f:?}: the sharpen-off module must fetch exactly once, before every selection")),
+    }
+}
+
+#[test]
+fn nosharpen_committed_source_is_the_generator_output() {
+    let committed = read_shader(&format!("{NOSHARPEN_STEM}.hlsl"));
+    let generated = boyko_shaderdsl::emit::emit_post_final_nosharpen_comp();
+    assert!(
+        committed == generated,
+        "{NOSHARPEN_STEM}.hlsl DRIFTED from boyko_shaderdsl::emit::emit_post_final_nosharpen_comp — re-run `cargo run -p \
+         boyko_shaderdsl --features emit --bin emit_post`, re-DXC the .spv with the recipe in the \
+         shader's header, and commit both.\n--- generated ---\n{generated}\n--- committed ---\n{committed}"
+    );
+    // The two committed modules trace one body: the sharpen-off one differs from post_final.comp
+    // only by its header and by the masked mode word.
+    let uber = read_shader(&format!("{STEM}.hlsl"));
+    assert_eq!(
+        generated_span(&committed, "post_final_bindings"),
+        generated_span(&uber, "post_final_bindings"),
+        "the two modules must declare the same bindings (one set layout serves both)"
+    );
+    assert!(
+        committed.contains("uint post_mode_words = mode_words & 4294967293u;"),
+        "the sharpen-off module masks the sharpen bit off the runtime word"
+    );
+}
+
+#[test]
+fn nosharpen_header_pins_the_frozen_recipe() {
+    let src = read_shader(&format!("{NOSHARPEN_STEM}.hlsl"));
+    let recipe = "C:\\VulkanSDK\\1.4.350.0\\Bin\\dxc.exe -spirv -T cs_6_0 -E main \\\n\
+                  //       -fspv-target-env=vulkan1.3 post_final_nosharpen.comp.hlsl -Fo post_final_nosharpen.comp.spv";
+    assert!(src.contains(recipe), "{NOSHARPEN_STEM}.hlsl's header no longer pins the recipe this gate runs");
+}
+
+#[test]
+fn post_final_nosharpen_spv_byte_identical() {
+    let Some(dxc) = find_tool("dxc") else {
+        eprintln!("SKIP post_final_nosharpen_spv_byte_identical: no dxc on this host");
+        return;
+    };
+    let committed_path = shaders_dir().join(format!("{NOSHARPEN_STEM}.spv"));
+    let committed = std::fs::read(&committed_path)
+        .unwrap_or_else(|e| panic!("missing committed {}: {e}", committed_path.display()));
+    let out_spv = child_guard::scratch_path(&format!("{NOSHARPEN_STEM}.redxc.spv"));
+    let status = Command::new(&dxc)
+        .current_dir(shaders_dir())
+        .args(["-spirv", "-T", "cs_6_0", "-E", "main", "-fspv-target-env=vulkan1.3"])
+        .arg(format!("{NOSHARPEN_STEM}.hlsl"))
+        .arg("-Fo")
+        .arg(&*out_spv)
+        .status_within(DXC_DEADLINE)
+        .expect("invariant: dxc was located and must run");
+    assert!(status.success(), "dxc failed re-compiling {NOSHARPEN_STEM}.hlsl under the frozen recipe");
+    let fresh = std::fs::read(&*out_spv).expect("invariant: dxc wrote the re-DXC .spv");
+    assert!(
+        committed == fresh,
+        "{NOSHARPEN_STEM}.spv ({} bytes committed, {} fresh) is NOT the re-DXC of {NOSHARPEN_STEM}.hlsl under the \
+         frozen recipe — the committed .spv is stale, or the host dxc is not VulkanSDK 1.4.350.0.",
+        committed.len(),
+        fresh.len()
+    );
+}
+
+#[test]
+fn nosharpen_spirv_censuses() {
+    let Some(dis) = disassembly_of(NOSHARPEN_STEM, "nosharpen_spirv_censuses") else { return };
+    let (gamma_pows, pows, exp2, log2) = pow_census(&dis, OETF_GAMMA_EXP);
+    let (agx_pows, _, _, _) = pow_census(&dis, AGX_LINEARIZE_EXP);
+    assert_eq!(
+        (gamma_pows, agx_pows, pows, exp2, log2),
+        (3, 3, 6, 0, 3),
+        "the sharpen-off module carries the OETF's three Pow, AgX's three Pow on 2.2 and three Log2, no Exp2"
+    );
+    let (dont_flatten, v3_selects) = branch_census(&dis);
+    assert_eq!(dont_flatten, 3, "the sharpen-off module's only DontFlatten selections are the three-level dispatch (DXC folded the sharpen stage)");
+    assert_eq!(v3_selects, 0, "a float3 OpSelect means a branch was if-converted");
+    if let Err(why) = check_nosharpen_fetches(&dis) {
+        panic!("{why}");
+    }
+    if let Err(why) = check_agx_placement(&dis, false) {
+        panic!("{why}");
+    }
+    let decorated = binding_decorations(&dis);
+    for b in POST_FINAL_BINDINGS {
+        assert_eq!(decorated.get(b.name), Some(&(b.set, b.binding)), "{NOSHARPEN_STEM}: `{}` is not at (set {}, binding {})", b.name, b.set, b.binding);
+    }
+}
+
+#[test]
+fn nosharpen_stage_trace_and_skeleton() {
+    let src = read_shader(&format!("{NOSHARPEN_STEM}.hlsl"));
+    let body = generated_span(&src, "post_final_main")
+        .strip_prefix("float4 post_final_main(uint2 px) {\n")
+        .and_then(|b| b.strip_suffix("}\n"))
+        .expect("invariant: the post_final_main span wraps one function");
+    if let Err(why) = check_stage_order(body, &order_labels()) {
+        panic!("{NOSHARPEN_STEM}: {why}");
+    }
+    if let Err(why) = check_stage_chain(body) {
+        panic!("{NOSHARPEN_STEM}: {why}");
+    }
+    if let Err(why) = skeleton_violations(&skeleton_code(&src)) {
+        panic!("{NOSHARPEN_STEM}: {why}");
+    }
 }
 
 // `status_within` / `output_within` and `scratch_path` live in `tests/child_guard/mod.rs`; declared

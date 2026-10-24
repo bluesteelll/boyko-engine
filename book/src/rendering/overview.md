@@ -246,9 +246,10 @@ device-local output, synchronized by the derived barriers.
 ## What ships today
 
 The table lists each feature with its default and its switch. The base frame needs no
-configuration: the Deferred path with both geometry legs, meshes, textured PBR, lights, ACES
-tonemapping and, with the SDF leg, SDF tracing are on by default. Every **opt-in** feature
-defaults to **off**, so an unconfigured world renders without it. (The exception, ray-traced
+configuration: the Deferred path with both geometry legs, meshes, textured PBR, lights,
+Khronos PBR Neutral tonemapping and, with the SDF leg, SDF tracing are on by default.
+Every **opt-in** feature defaults to **off**, so an unconfigured world renders without it.
+(The exception, ray-traced
 shadows, exists only in `hwrt` builds, where the boot selects it on a ray-query GPU.) Most
 opt-in features have an owner-set config resource: to turn one on, overwrite its config
 **after** `add_plugins(EnginePlugins::…)`, because the plugins insert the defaults. Some also
@@ -263,7 +264,7 @@ need a marker component on the entities they apply to, as the Knob column notes.
 | [Textured PBR, bindless textures, PNG decoding](materials-and-textures.md) | `boyko_render`, `boyko_image` | on | — |
 | [Lights](lighting.md): directional, point, spot, sky ambient | `boyko_render` | on | `LightingConfig` |
 | [Clustered light cull](lighting.md) | `boyko_render` | off; Visibility Buffer path only | `LightingConfig::clusters_enabled` / `cluster_select` |
-| [Tonemapping](lighting.md): ACES, Neutral, Reinhard-Jodie | `boyko_render` | ACES | `LightingConfig::tonemapper` |
+| [Tonemapping](lighting.md): Khronos PBR Neutral, ACES, AgX, Reinhard-Jodie | `boyko_render` | Neutral | `LightingConfig::tonemapper` |
 | [SDF sphere-tracing](sdf.md), its soft shadow and AO | `boyko_rhi_vulkan` | on with the SDF leg | — |
 | [Cascaded sun shadows](shadows-and-ao.md) | `boyko_render`, `boyko_app` | off | `CsmConfig::cascade_count` > 0, plus `ShadowCaster` on the casting meshes |
 | [Spot/point shadow atlas](shadows-and-ao.md) | `boyko_render`, `boyko_app` | off | `ShadowConfig::enabled`, plus `CastsPunctualShadow` on the lights and `ShadowCaster` on the casting meshes |

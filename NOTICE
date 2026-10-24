@@ -10,6 +10,8 @@ license text:
 - An FXAA shader adapted from Rendu (MIT): Simon Rodriguez
 - AMD FidelityFX FSR 1 RCAS and FSR 2 reversible-tonemap functions (MIT):
   Advanced Micro Devices, Inc.
+- AgX tone-mapping constants from three.js (MIT): three.js authors; cross-checked
+  against Filament's AgX (Apache-2.0): The Android Open Source Project
 - Jolt Physics-derived benchmark material (MIT): Jorrit Rouwe
 - vis-network 9.1.9 (Apache-2.0 OR MIT): Almende B.V. and visjs contributors
 - mermaid (MIT): Knut Sveidqvist and contributors — documentation site only

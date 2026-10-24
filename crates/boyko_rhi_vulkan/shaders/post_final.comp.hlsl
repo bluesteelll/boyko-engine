@@ -38,6 +38,11 @@ static const float RCAS_LIMIT = 0.1875;
 static const float RCAS_INV_EPS = 1.5266243e-5;
 static const uint TONEMAP_MODE_SHIFT = 8u;
 static const uint TONEMAP_MODE_MASK = 15u;
+static const uint TONEMAP_AGX = 3u;
+static const float AGX_LOG_FLOOR = 1.0e-10;
+static const float AGX_MIN_EV = -12.47393;
+static const float AGX_EV_INV_RANGE = 0.060606066;
+static const float AGX_LINEARIZE_EXP = 2.2;
 static const uint TONEMAP_NEUTRAL = 1u;
 static const uint TONEMAP_REINHARD_JODIE = 2u;
 static const float OETF_GAMMA_EXP = 0.45454547;
@@ -92,42 +97,65 @@ float4 post_final_main(uint2 px) {
     uint post_tonemap_mode = mode_words >> TONEMAP_MODE_SHIFT & TONEMAP_MODE_MASK;
     float3 post_tonemapped = post_stage_rcas;
     [branch]
-    if (post_tonemap_mode == TONEMAP_NEUTRAL) {
-        float t39 = min(post_stage_rcas.x, min(post_stage_rcas.y, post_stage_rcas.z));
-        float t40 = (t39 < 0.08) ? (t39 - 6.25 * t39 * t39) : (0.04);
-        float t41 = post_stage_rcas.x - t40;
-        float t42 = post_stage_rcas.y - t40;
-        float t43 = post_stage_rcas.z - t40;
-        float t44 = max(t41, max(t42, t43));
-        float t45 = 1.0 - 0.057600003 / (t44 + 0.24000001 - 0.76);
-        float t46 = t45 / t44;
-        float t47 = 1.0 - 1.0 / (0.15 * (t44 - t45) + 1.0);
-        post_tonemapped = float3(((t44 < 0.76) ? (t41) : (lerp(t41 * t46, t45, t47))), ((t44 < 0.76) ? (t42) : (lerp(t42 * t46, t45, t47))), ((t44 < 0.76) ? (t43) : (lerp(t43 * t46, t45, t47))));
+    if (post_tonemap_mode == TONEMAP_AGX) {
+        float t39 = 0.5448121 * post_stage_rcas.x + 0.37379745 * post_stage_rcas.y + 0.08138096 * post_stage_rcas.z;
+        float t40 = 0.14041935 * post_stage_rcas.x + 0.7541078 * post_stage_rcas.y + 0.10539675 * post_stage_rcas.z;
+        float t41 = 0.088817134 * post_stage_rcas.x + 0.17885976 * post_stage_rcas.y + 0.7323154 * post_stage_rcas.z;
+        float t42 = clamp((log2(max(t39, AGX_LOG_FLOOR)) - AGX_MIN_EV) * AGX_EV_INV_RANGE, 0.0, 1.0);
+        float t43 = (((((15.5 * t42 + -40.14) * t42 + 31.96) * t42 + -6.868) * t42 + 0.4298) * t42 + 0.1191) * t42 + -0.00232;
+        float t44 = clamp((log2(max(t40, AGX_LOG_FLOOR)) - AGX_MIN_EV) * AGX_EV_INV_RANGE, 0.0, 1.0);
+        float t45 = (((((15.5 * t44 + -40.14) * t44 + 31.96) * t44 + -6.868) * t44 + 0.4298) * t44 + 0.1191) * t44 + -0.00232;
+        float t46 = clamp((log2(max(t41, AGX_LOG_FLOOR)) - AGX_MIN_EV) * AGX_EV_INV_RANGE, 0.0, 1.0);
+        float t47 = (((((15.5 * t46 + -40.14) * t46 + 31.96) * t46 + -6.868) * t46 + 0.4298) * t46 + 0.1191) * t46 + -0.00232;
+        float t48 = 1.1271006 * t43 + -0.11060664 * t45 + -0.016493939 * t47;
+        float t49 = -0.14132977 * t43 + 1.1578237 * t45 + -0.016493939 * t47;
+        float t50 = -0.14132977 * t43 + -0.11060664 * t45 + 1.2519364 * t47;
+        float t51 = pow(max(t48, 0.0), AGX_LINEARIZE_EXP);
+        float t52 = pow(max(t49, 0.0), AGX_LINEARIZE_EXP);
+        float t53 = pow(max(t50, 0.0), AGX_LINEARIZE_EXP);
+        float t54 = 1.6605 * t51 + -0.5876 * t52 + -0.0728 * t53;
+        float t55 = -0.1246 * t51 + 1.1329 * t52 + -0.0083 * t53;
+        float t56 = -0.0182 * t51 + -0.1006 * t52 + 1.1187 * t53;
+        post_tonemapped = float3(clamp(t54, 0.0, 1.0), clamp(t55, 0.0, 1.0), clamp(t56, 0.0, 1.0));
     } else {
         [branch]
-        if (post_tonemap_mode == TONEMAP_REINHARD_JODIE) {
-            float t48 = dot(post_stage_rcas, float3(0.2126, 0.7152, 0.0722));
-            float t49 = post_stage_rcas.x / (1.0 + post_stage_rcas.x);
-            float t50 = post_stage_rcas.y / (1.0 + post_stage_rcas.y);
-            float t51 = post_stage_rcas.z / (1.0 + post_stage_rcas.z);
-            post_tonemapped = float3(clamp(lerp(post_stage_rcas.x / (1.0 + t48), t49, t49), 0.0, 1.0), clamp(lerp(post_stage_rcas.y / (1.0 + t48), t50, t50), 0.0, 1.0), clamp(lerp(post_stage_rcas.z / (1.0 + t48), t51, t51), 0.0, 1.0));
+        if (post_tonemap_mode == TONEMAP_NEUTRAL) {
+            float t57 = min(post_stage_rcas.x, min(post_stage_rcas.y, post_stage_rcas.z));
+            float t58 = (t57 < 0.08) ? (t57 - 6.25 * t57 * t57) : (0.04);
+            float t59 = post_stage_rcas.x - t58;
+            float t60 = post_stage_rcas.y - t58;
+            float t61 = post_stage_rcas.z - t58;
+            float t62 = max(t59, max(t60, t61));
+            float t63 = 1.0 - 0.057600003 / (t62 + 0.24000001 - 0.76);
+            float t64 = t63 / t62;
+            float t65 = 1.0 - 1.0 / (0.15 * (t62 - t63) + 1.0);
+            post_tonemapped = float3(((t62 < 0.76) ? (t59) : (lerp(t59 * t64, t63, t65))), ((t62 < 0.76) ? (t60) : (lerp(t60 * t64, t63, t65))), ((t62 < 0.76) ? (t61) : (lerp(t61 * t64, t63, t65))));
         } else {
-            float t52 = 0.59719 * post_stage_rcas.x + 0.35458 * post_stage_rcas.y + 0.04823 * post_stage_rcas.z;
-            float t53 = 0.076 * post_stage_rcas.x + 0.90834 * post_stage_rcas.y + 0.01566 * post_stage_rcas.z;
-            float t54 = 0.0284 * post_stage_rcas.x + 0.13383 * post_stage_rcas.y + 0.83777 * post_stage_rcas.z;
-            float t55 = t52 * (t52 + 0.0245786) - 9.0537e-5;
-            float t56 = t52 * (0.983729 * t52 + 0.432951) + 0.238081;
-            float t57 = t55 / t56;
-            float t58 = t53 * (t53 + 0.0245786) - 9.0537e-5;
-            float t59 = t53 * (0.983729 * t53 + 0.432951) + 0.238081;
-            float t60 = t58 / t59;
-            float t61 = t54 * (t54 + 0.0245786) - 9.0537e-5;
-            float t62 = t54 * (0.983729 * t54 + 0.432951) + 0.238081;
-            float t63 = t61 / t62;
-            float t64 = 1.60475 * t57 + -0.53108 * t60 + -0.07367 * t63;
-            float t65 = -0.10208 * t57 + 1.10813 * t60 + -0.00605 * t63;
-            float t66 = -0.00327 * t57 + -0.07276 * t60 + 1.07602 * t63;
-            post_tonemapped = float3(clamp(t64, 0.0, 1.0), clamp(t65, 0.0, 1.0), clamp(t66, 0.0, 1.0));
+            [branch]
+            if (post_tonemap_mode == TONEMAP_REINHARD_JODIE) {
+                float t66 = dot(post_stage_rcas, float3(0.2126, 0.7152, 0.0722));
+                float t67 = post_stage_rcas.x / (1.0 + post_stage_rcas.x);
+                float t68 = post_stage_rcas.y / (1.0 + post_stage_rcas.y);
+                float t69 = post_stage_rcas.z / (1.0 + post_stage_rcas.z);
+                post_tonemapped = float3(clamp(lerp(post_stage_rcas.x / (1.0 + t66), t67, t67), 0.0, 1.0), clamp(lerp(post_stage_rcas.y / (1.0 + t66), t68, t68), 0.0, 1.0), clamp(lerp(post_stage_rcas.z / (1.0 + t66), t69, t69), 0.0, 1.0));
+            } else {
+                float t70 = 0.59719 * post_stage_rcas.x + 0.35458 * post_stage_rcas.y + 0.04823 * post_stage_rcas.z;
+                float t71 = 0.076 * post_stage_rcas.x + 0.90834 * post_stage_rcas.y + 0.01566 * post_stage_rcas.z;
+                float t72 = 0.0284 * post_stage_rcas.x + 0.13383 * post_stage_rcas.y + 0.83777 * post_stage_rcas.z;
+                float t73 = t70 * (t70 + 0.0245786) - 9.0537e-5;
+                float t74 = t70 * (0.983729 * t70 + 0.432951) + 0.238081;
+                float t75 = t73 / t74;
+                float t76 = t71 * (t71 + 0.0245786) - 9.0537e-5;
+                float t77 = t71 * (0.983729 * t71 + 0.432951) + 0.238081;
+                float t78 = t76 / t77;
+                float t79 = t72 * (t72 + 0.0245786) - 9.0537e-5;
+                float t80 = t72 * (0.983729 * t72 + 0.432951) + 0.238081;
+                float t81 = t79 / t80;
+                float t82 = 1.60475 * t75 + -0.53108 * t78 + -0.07367 * t81;
+                float t83 = -0.10208 * t75 + 1.10813 * t78 + -0.00605 * t81;
+                float t84 = -0.00327 * t75 + -0.07276 * t78 + 1.07602 * t81;
+                post_tonemapped = float3(clamp(t82, 0.0, 1.0), clamp(t83, 0.0, 1.0), clamp(t84, 0.0, 1.0));
+            }
         }
     }
     float3 post_stage_tonemap = post_tonemapped;

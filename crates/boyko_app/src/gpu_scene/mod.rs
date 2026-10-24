@@ -47,7 +47,7 @@ use boyko_rhi_vulkan::compute::{
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, HZB_BUILD_PUSH_BYTES, hzb_build_spirv,
     interp_instances_spirv, punctual_depth_fs_spirv,
-    post_final_spirv, present_sample_fs_spirv, punctual_depth_vs_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
+    post_final_spirv_for, present_sample_fs_spirv, punctual_depth_vs_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
     sdf_forward_march_sdfonly_viewt_spirv, sdf_forward_march_viewt_spirv,
     sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
@@ -1211,8 +1211,13 @@ pub(crate) struct GpuSceneBundles {
     taa_linear_sampler: VulkanSampler,
     /// Render wave PX1a (D-G5): the `post_final` compute pipeline (the generated
     /// `post_final.comp`) — built UNCONDITIONALLY at boot: the pass runs on every frame of every
-    /// path.
+    /// path. Since render wave PXt only the frames whose mode word sets the sharpen bit bind it.
     post_final_pipeline: ComputePipeline,
+    /// Render wave PXt (OPEN-ITEMS 19): the sharpen-off `post_final` pipeline (the generated
+    /// `post_final_nosharpen.comp`, RCAS compiled out) — built UNCONDITIONALLY at boot beside
+    /// [`Self::post_final_pipeline`], against the same set layout and push range; every frame whose
+    /// mode word clears the sharpen bit binds it (`PostFinalActivation::pipeline_for`).
+    post_final_pipeline_nosharpen: ComputePipeline,
     /// Render wave PX1a (D-G5): its 3-binding layout — { `gScene` SAMPLED_IMAGE @0 (recorded at
     /// GENERAL), `gDisplay` STORAGE @1, the `PostFinal` UBO @2 } (`POST_FINAL_BINDINGS`).
     /// [`GBufferTargets`] writes the per-FIF `post_final` set against it once per extent.
@@ -2982,7 +2987,7 @@ impl GpuSceneBundles {
             },
         )
         .expect("invariant: post_final bind-group layout create");
-        let post_final_cs = RhiDevice::create_shader_module(device, post_final_spirv())
+        let post_final_cs = RhiDevice::create_shader_module(device, post_final_spirv_for(true))
             .expect("invariant: post_final compute shader module create");
         let post_final_pipeline = RhiDevice::create_compute_pipeline(
             device,
@@ -2998,6 +3003,22 @@ impl GpuSceneBundles {
             },
         )
         .expect("invariant: post_final compute pipeline create");
+        // Render wave PXt (OPEN-ITEMS 19): the sharpen-off module's pipeline — the same body with
+        // RCAS compiled out, against the same set layout and push range (layout-compatible, so the
+        // per-FIF set ring serves both); a frame whose mode word clears the sharpen bit binds it.
+        let post_final_nosharpen_cs = RhiDevice::create_shader_module(device, post_final_spirv_for(false))
+            .expect("invariant: post_final sharpen-off compute shader module create");
+        let post_final_pipeline_nosharpen = RhiDevice::create_compute_pipeline(
+            device,
+            &ComputePipelineDesc {
+                module: &post_final_nosharpen_cs,
+                entry: c"main",
+                push_constant_bytes: 4,
+                bind_group_layout: Some(&post_final_layout),
+                spec_constants: &[],
+            },
+        )
+        .expect("invariant: post_final sharpen-off compute pipeline create");
 
         // Render P7-Q2: the SSAO compute pass — 3 pre-compiled quality-variant pipelines
         // sharing ONE dedicated 5-binding layout, built UNCONDITIONALLY here (like
@@ -3301,6 +3322,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, ssao_atrous_read8_cs);
             RhiDevice::destroy_shader_module(device, taa_resolve_cs);
             RhiDevice::destroy_shader_module(device, post_final_cs);
+            RhiDevice::destroy_shader_module(device, post_final_nosharpen_cs);
             RhiDevice::destroy_shader_module(device, ssao_cs_high);
             RhiDevice::destroy_shader_module(device, ssao_cs_medium);
             RhiDevice::destroy_shader_module(device, ssao_cs_low);
@@ -4850,6 +4872,7 @@ impl GpuSceneBundles {
             taa_resolve_layout,
             taa_linear_sampler,
             post_final_pipeline,
+            post_final_pipeline_nosharpen,
             post_final_layout,
             ssao_pipelines,
             ssao_vb_pipelines,
@@ -7016,7 +7039,11 @@ impl GpuSceneBundles {
                 linear_sampler: &self.taa_linear_sampler,
                 reset: taa_reset,
             }),
-            post_final: PostFinalActivation { pipeline: &self.post_final_pipeline, layout: &self.post_final_layout },
+            post_final: PostFinalActivation {
+                pipeline: &self.post_final_pipeline,
+                pipeline_nosharpen: &self.post_final_pipeline_nosharpen,
+                layout: &self.post_final_layout,
+            },
             post_final_words,
             mesh_draw,
             csm_cascade_texture: &self.csm.cascade,
@@ -8068,6 +8095,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_compute_pipeline(ctx, self.taa_resolve_pipeline);
             RhiDevice::destroy_bind_group_layout(ctx, self.taa_resolve_layout);
             RhiDevice::destroy_compute_pipeline(ctx, self.post_final_pipeline);
+            RhiDevice::destroy_compute_pipeline(ctx, self.post_final_pipeline_nosharpen);
             RhiDevice::destroy_bind_group_layout(ctx, self.post_final_layout);
             // Render P7-Q2: the 3 SSAO pipelines share `ssao_layout` — pipelines before the
             // shared layout (reverse creation order), built UNCONDITIONALLY at boot (every

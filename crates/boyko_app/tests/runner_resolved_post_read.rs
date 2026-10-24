@@ -28,11 +28,14 @@ use boyko_render::post::gpu::{POST_MODE_SHARPEN, PostFinalGpu};
 use boyko_render::post::{PostPlugin, ResolvedPost};
 use boyko_render::{SharpenMode, TaaConfig};
 
+/// The default and two configs whose curve is NOT the default's (render wave PXt, ruling 116: the
+/// default is Khronos PBR Neutral, so the second config names AgX), so a read that ignored the
+/// config's curve and took the default's would be red.
 fn configs() -> [LightingConfig; 3] {
     let d = LightingConfig::default();
     [
         d,
-        LightingConfig { exposure: 2.5, tonemapper: Tonemapper::Neutral, ..d },
+        LightingConfig { exposure: 2.5, tonemapper: Tonemapper::AgX, ..d },
         LightingConfig { exposure: 0.125, tonemapper: Tonemapper::ReinhardJodie, ..d },
     ]
 }

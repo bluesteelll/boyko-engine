@@ -380,7 +380,9 @@ the accumulated linear radiance. There is no auto-exposure: the scalar is fixed 
 change it.
 
 The output stage then applies a **tonemapper**, `LightingConfig::tonemapper`:
-`Tonemapper::Aces` (the default), `Neutral` or `ReinhardJodie`. One more output-stage knob,
+`Tonemapper::Neutral` (Khronos PBR Neutral, the default), `Aces`, `AgX` or `ReinhardJodie`.
+[Exposure and tonemapping](materials-and-textures.md#exposure-and-tonemapping) describes each
+curve. One more output-stage knob,
 `terminator_softening` (default `0.0`), wraps the diffuse terminator of direct lights into
 a soft ramp, so normal-map slopes under grazing light do not turn into hard dark islands.
 
@@ -389,7 +391,7 @@ use boyko_render::light::{LightingConfig, Tonemapper};
 
 // After `app.add_plugins(EnginePlugins::window(..))`, which inserts the default config.
 app.insert_resource(LightingConfig {
-    tonemapper: Tonemapper::Neutral,
+    tonemapper: Tonemapper::AgX,
     exposure: 1.5,
     ..LightingConfig::default()
 });
@@ -425,7 +427,7 @@ The renderer has no frame-time benchmark yet.
   the punctual shadow atlas, the shadow denoiser (`hwrt`) and SSAO (off by default); and
   ray-query mesh shadows (`hwrt` builds on capable hardware).
 - **Global illumination** — SDF DDGI, off by default.
-- **Output** — exposure, three tonemappers, terminator softening.
+- **Output** — exposure, four tonemappers (Khronos PBR Neutral by default), terminator softening.
 
 **Not shipped:** auto-exposure, and baked (precomputed) irradiance volumes. The design
 notes for further GI work live in

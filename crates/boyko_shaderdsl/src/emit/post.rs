@@ -199,9 +199,15 @@ fn traced_constants(arena: &[Node], symbols: &[&'static str]) -> Vec<(&'static s
 /// Which `post_final` module [`emit_post_final_comp_with`] prints.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PostFinalTwin {
-    /// The committed module: the tonemapper is the runtime mode word, a `[branch]` dispatch over the
-    /// three curves ([`emit_post_final_comp`]).
+    /// The committed module a sharpen-ON frame binds: the tonemapper is the runtime mode word, a
+    /// `[branch]` dispatch over the four curves ([`emit_post_final_comp`]).
     Uber,
+    /// Render wave PXt (OPEN-ITEMS 19, `pxt/cut.md` D-O1) — the committed module a sharpen-OFF frame
+    /// binds ([`emit_post_final_nosharpen_comp`], `post_final_nosharpen.comp.hlsl`): the same traced
+    /// body with the mode word masked by `!POST_MODE_SHARPEN` — the [`PostFinalTwin::NoRcas`] mask,
+    /// so DXC folds the RCAS branch away (one `OpImageFetch`) — while the tonemapper stays the
+    /// runtime word. Shipped: the host selects it per frame when the sharpen bit is clear.
+    NoSharpen,
     /// Render wave PX1a O6 (`boyko_rhi_vulkan/tests/post_final_occupancy.rs`, TEST-ONLY, never
     /// committed): the same traced body with the mode word replaced by the ACES constant
     /// (`TONEMAP_ACES << TONEMAP_MODE_SHIFT`), so DXC folds the dispatch to the ACES arm — the
@@ -213,14 +219,22 @@ pub enum PostFinalTwin {
     /// Render wave PX1b D-R10 (3) (`post_final_occupancy.rs`, TEST-ONLY, never committed): the same
     /// traced body with the mode word masked by `!POST_MODE_SHARPEN`, so DXC folds the sharpen
     /// branch away (measured on DXC 1.4.350: 5 → 1 `OpImageFetch`, `px1b/logs/w2_fold_probe.log`)
-    /// while the tonemapper stays the runtime word — the register twin of the zero-cost gate.
+    /// while the tonemapper stays the runtime word — the register twin of the zero-cost gate. Since
+    /// render wave PXt the shipped [`PostFinalTwin::NoSharpen`] traces the same body; the test
+    /// DXCs this twin and holds the committed sharpen-off module to it, instruction for instruction.
     NoRcas,
+    /// Render wave PXt O6 re-aimed (`post_final_occupancy.rs`, TEST-ONLY, never committed): the mode
+    /// word replaced by the AgX constant with the sharpen bit clear (`TONEMAP_AGX <<
+    /// TONEMAP_MODE_SHIFT`), so DXC folds the dispatch to the AgX arm and the RCAS branch away — AgX's
+    /// path with the other arms compiled out (the default curve's path from PXt's C8 until ruling 116
+    /// made Neutral the default), recorded beside the sharpen-off module.
+    AgxOnly,
 }
 
 /// Traces [`crate::post::post_final_main`] over [`EmitCf`] and returns `(body span, constants)`;
-/// `twin` chooses whether the mode word is the UBO input ([`PostFinalTwin::Uber`]), the ACES
-/// constant ([`PostFinalTwin::AcesOnly`]) or the UBO input with the sharpen bit masked off
-/// ([`PostFinalTwin::NoRcas`]).
+/// `twin` chooses whether the mode word is the UBO input ([`PostFinalTwin::Uber`]), the ACES or the
+/// AgX constant ([`PostFinalTwin::AcesOnly`], [`PostFinalTwin::AgxOnly`]) or the UBO input with the
+/// sharpen bit masked off ([`PostFinalTwin::NoSharpen`], [`PostFinalTwin::NoRcas`]).
 fn trace_post_final_main(twin: PostFinalTwin) -> (String, Vec<(&'static str, &'static str, String)>) {
     let (floats, uints) = post_input_names();
     let float_in: Vec<&str> = floats.iter().map(String::as_str).collect();
@@ -234,9 +248,10 @@ fn trace_post_final_main(twin: PostFinalTwin) -> (String, Vec<(&'static str, &'s
             PostFinalTwin::AcesOnly => {
                 <EmitCf as Cf>::uint_lit(post::TONEMAP_ACES << post::TONEMAP_MODE_SHIFT)
             }
+            PostFinalTwin::AgxOnly => <EmitCf as Cf>::uint_lit(post::TONEMAP_AGX << post::TONEMAP_MODE_SHIFT),
             // Materialised: the `&` printer spells its operands bare, so an inline mask under the
             // tonemapper's `>>` would print `mode_words & M >> SHIFT` (`>>` binds first).
-            PostFinalTwin::NoRcas => <EmitCf as Cf>::temp_uint(
+            PostFinalTwin::NoSharpen | PostFinalTwin::NoRcas => <EmitCf as Cf>::temp_uint(
                 "post_mode_words",
                 <EmitCf as Cf>::and_u(
                     Emit::uint_input(input_id(&uints, "mode_words")),
@@ -328,31 +343,58 @@ pub fn emit_post_final_comp() -> String {
     emit_post_final_comp_with(PostFinalTwin::Uber)
 }
 
-/// [`emit_post_final_comp`] for any twin: [`PostFinalTwin::Uber`] is the committed file, byte for
-/// byte; [`PostFinalTwin::AcesOnly`] (PX1a O6) and [`PostFinalTwin::NoRcas`] (PX1b's register twin)
+/// Generates the WHOLE committed `boyko_rhi_vulkan/shaders/post_final_nosharpen.comp.hlsl` (render
+/// wave PXt, OPEN-ITEMS 19): [`emit_post_final_comp`]'s template over the body traced with the
+/// sharpen bit masked off ([`PostFinalTwin::NoSharpen`]), headed with its own name and recipe.
+pub fn emit_post_final_nosharpen_comp() -> String {
+    emit_post_final_comp_with(PostFinalTwin::NoSharpen)
+}
+
+/// The header paragraph of the committed `post_final.comp.hlsl`.
+const POST_FINAL_INTRO: &str = "// post_final.comp -- render wave PXe: the post chain's final pass, GENERATED WHOLE; wired since
+// render wave PX1a as every path's unconditional tail. Per pixel: one scene fetch, then hdr_sanitize
+// -> pre_ratio_apply -> rcas (render wave PX1b: FSR 1 RCAS over the cross, four more fetches, only
+// under the mode word's sharpen bit) -> tonemap_select -> oetf_gamma22 (`boyko_shaderdsl::post`),
+// stored to `display`.
+";
+
+/// The header paragraph of the committed `post_final_nosharpen.comp.hlsl`.
+const POST_FINAL_NOSHARPEN_INTRO: &str = "// post_final_nosharpen.comp -- render wave PXt (OPEN-ITEMS 19): post_final's SHARPEN-OFF module,
+// GENERATED WHOLE from the same traced body as post_final.comp with the mode word masked by
+// ~POST_MODE_SHARPEN, so DXC folds the RCAS branch away (one scene fetch, no ring taps): per pixel
+// hdr_sanitize -> pre_ratio_apply -> tonemap_select -> oetf_gamma22 (`boyko_shaderdsl::post`), stored
+// to `display`. The host binds it on every frame whose mode word clears the sharpen bit
+// (`PostFinalActivation::pipeline_for`); post_final.comp serves the frames that set it.
+";
+
+/// [`emit_post_final_comp`] for any twin: [`PostFinalTwin::Uber`] and [`PostFinalTwin::NoSharpen`]
+/// are the two committed files, byte for byte; [`PostFinalTwin::AcesOnly`] (PX1a O6),
+/// [`PostFinalTwin::NoRcas`] (PX1b's register twin) and [`PostFinalTwin::AgxOnly`] (PXt's O6 row)
 /// are TEST-ONLY (`post_final_occupancy.rs` DXCs them at test time under the same frozen recipe;
 /// they are never committed), each headed by one line that says so.
 pub fn emit_post_final_comp_with(twin: PostFinalTwin) -> String {
     let (body, consts) = trace_post_final_main(twin);
     let main_fn = format!("float4 post_final_main(uint2 px) {{\n{body}}}\n");
     let twin_line = match twin {
-        PostFinalTwin::Uber => "",
+        PostFinalTwin::Uber | PostFinalTwin::NoSharpen => "",
         PostFinalTwin::AcesOnly => {
             "// TEST-ONLY O6 TWIN (PostFinalTwin::AcesOnly): the mode word is the ACES constant. Never committed.\n"
         }
         PostFinalTwin::NoRcas => {
             "// TEST-ONLY REGISTER TWIN (PostFinalTwin::NoRcas): the mode word is masked by ~POST_MODE_SHARPEN. Never committed.\n"
         }
+        PostFinalTwin::AgxOnly => {
+            "// TEST-ONLY O6 TWIN (PostFinalTwin::AgxOnly): the mode word is the AgX constant, the sharpen bit clear. Never committed.\n"
+        }
+    };
+    let (intro, stem, emitter) = match twin {
+        PostFinalTwin::NoSharpen => (POST_FINAL_NOSHARPEN_INTRO, "post_final_nosharpen", "emit_post_final_nosharpen_comp"),
+        _ => (POST_FINAL_INTRO, "post_final", "emit_post_final_comp"),
     };
     let file = format!(
-        r#"// post_final.comp -- render wave PXe: the post chain's final pass, GENERATED WHOLE; wired since
-// render wave PX1a as every path's unconditional tail. Per pixel: one scene fetch, then hdr_sanitize
-// -> pre_ratio_apply -> rcas (render wave PX1b: FSR 1 RCAS over the cross, four more fetches, only
-// under the mode word's sharpen bit) -> tonemap_select -> oetf_gamma22 (`boyko_shaderdsl::post`),
-// stored to `display`.
-//
+        r#"{intro}//
 // GENERATED by `cargo run -p boyko_shaderdsl --features emit --bin emit_post`. The whole file is the
-// generator's output (`boyko_shaderdsl::emit::emit_post_final_comp`); a hand-edit fails
+// generator's output (`boyko_shaderdsl::emit::{emitter}`); a hand-edit fails
 // `boyko_rhi_vulkan/tests/post_edsl_sync.rs`, which also byte-gates the committed .spv. The
 // declarations are printed from `post::POST_FINAL_BINDINGS` / `POST_FINAL_UBO_LAYOUT`; the body is
 // the trace of `post::post_final_main`, the SAME function PX0's host oracle evaluates. A stage is
@@ -361,7 +403,7 @@ pub fn emit_post_final_comp_with(twin: PostFinalTwin) -> String {
 // # Compile (offline + hermetic; the committed .spv is byte-gated)
 //
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
-//       -fspv-target-env=vulkan1.3 post_final.comp.hlsl -Fo post_final.comp.spv
+//       -fspv-target-env=vulkan1.3 {stem}.comp.hlsl -Fo {stem}.comp.spv
 
 {bindings}
 {consts}
