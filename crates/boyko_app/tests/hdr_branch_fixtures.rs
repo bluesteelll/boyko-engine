@@ -11,16 +11,23 @@
 //! (`BOYKO_IMAGE_DUMP` and `BOYKO_HOST_DUMP` are exclusive).
 //!
 //! - **Constant branches** (`lit = base`, `BACKGROUND_BASE`, `FORWARD_LIT_CLEAR`): every texel of
-//!   the region is a UNORM conversion of the constant the spec permits — per channel one of the two
-//!   codes nearest `f · 255` ([`constant8`]; a rounding mode is not the spec's).
+//!   the region is the display of the scene-linear constant the branch stores
+//!   ([`hdr_fixtures::BACKGROUND_SCENE`]) — `quantize8(post_final_eval(c))` within one code, both
+//!   UNORM neighbours of the device's value ([`hdr_fixtures::DISPLAY_LSB`]; a rounding mode is not
+//!   the spec's).
 //! - **Producer branches**: the receipt keys that select them hold the fixture's values, and the
-//!   region is not all conversions of the background constant.
+//!   region is not all the background constant's display.
 //! - **Hot variants** (every lit-store producer and the SSAA box): an emissive-only surface (black
 //!   albedo, no light, no SkyLight, SSAO / DDGI off — rule xvi's zeroed terms) or a uniform sky
 //!   (`sky = ground = r`, no directional) at `r = 2.0`; the region equals
 //!   `quantize8(post_final_eval(r))` within 1 LSB — the hot oracle is the traced body itself
-//!   (`boyko_shaderdsl::post`), at HEAD's ACES Hill + OETF — which proves the fixture delivers
-//!   `r ≥ 2.0` to its region now, instead of a wrong red at PX1a's test 11b.
+//!   (`boyko_shaderdsl::post`) — which proves the fixture delivers `r ≥ 2.0` to its region now,
+//!   instead of a wrong red at PX1a's test 11b.
+//!
+//! Every display oracle here evaluates the body under the RUN's own `post_final` words — the
+//! capture's receipt `post_word0..7` ([`hdr_fixtures::receipt_post_words`]) — never a spelled
+//! curve (render wave PXt, `pxt/cut.md` D-G2's rule): the fixtures run the default configuration,
+//! so they follow the engine's default tone curve, whichever one ships.
 //!
 //! # The producer matrix ([`producer_matrix`], host-tested here)
 //!
@@ -49,10 +56,11 @@ mod image_dump;
 
 use std::path::PathBuf;
 
+use boyko_shaderdsl::post::{TONEMAP_ACES, TONEMAP_AGX, TONEMAP_MODE_SHIFT, ubo_word};
 use graph_receipt::Receipt;
 use hdr_fixtures::{
-    BACKGROUND, Capture, Expect, Fixture, FIXTURES, HOT_R, Hot, admits, capture, constant8, fixture,
-    fixture_worker_main, hot8,
+    BACKGROUND_SCENE, Capture, DISPLAY_LSB, Expect, Fixture, FIXTURES, HOT_R, Hot, capture, default_post_words, display8,
+    displays, fixture, fixture_worker_main, hot8, receipt_post_words, tonemap_word,
 };
 
 /// **THE WORKER** — one fixture (`BOYKO_PX0_FIXTURE=<name>[:hot]`); the body is shared
@@ -70,29 +78,39 @@ const WORKER: &str = "hdr_branch_fixture_worker";
 // The drivers
 // ===============================================================================================
 
-/// The checks of one capture against its fixture (`hot` selects the hot oracle).
+/// The checks of one capture against its fixture (`hot` selects the hot oracle). Every oracle is
+/// the traced body under the capture's own `post_final` words (its receipt's `post_word0..7`).
 fn check(f: &Fixture, hot: bool, c: &Capture) -> Result<(), String> {
-    let all = |want: [u8; 3], tol: u8| c.region.iter().all(|p| (0..3).all(|k| p[k].abs_diff(want[k]) <= tol));
+    let words = receipt_post_words(&c.receipt);
+    let curve = tonemap_word(&words);
     if hot {
-        let want = hot8(HOT_R);
-        return if all(want, 1) {
+        let want = hot8(words, HOT_R);
+        if want.iter().any(|&v| v >= 254) {
+            return Err(format!(
+                "{} (hot): PREMISE: the run's words (tonemap word {curve}) display r = {HOT_R} as {want:?}: a saturated oracle cannot tell {HOT_R} from more",
+                f.name
+            ));
+        }
+        return if c.region.iter().all(|p| displays(want, *p)) {
             Ok(())
         } else {
             Err(format!(
-                "{} (hot): region radiance below {HOT_R}: expected quantize8(post_final_eval({HOT_R})) = {want:?} within 1 LSB, first texel {:?}",
+                "{} (hot): region radiance below {HOT_R}: expected quantize8(post_final_eval({HOT_R})) under the run's words (tonemap word {curve}) = {want:?} within {DISPLAY_LSB} LSB, first texel {:?}",
                 f.name, c.region[0]
             ))
         };
     }
     match f.expect {
-        Expect::Constant(k) => match c.region.iter().find(|p| !admits(k, **p)) {
-            None => Ok(()),
-            Some(p) => Err(format!(
-                "{}: the constant region is not a UNORM conversion of {k:?} (per channel {:?}; first other texel {p:?})",
-                f.name,
-                constant8(k)
-            )),
-        },
+        Expect::Constant(k) => {
+            let want = display8(words, k);
+            match c.region.iter().find(|p| !displays(want, **p)) {
+                None => Ok(()),
+                Some(p) => Err(format!(
+                    "{}: the constant region is not the display of the scene-linear {k:?} under the run's words (tonemap word {curve}): expected {want:?} within {DISPLAY_LSB} LSB, first other texel {p:?}",
+                    f.name
+                )),
+            }
+        }
         Expect::Producer(keys) => {
             for (k, v) in keys {
                 let got = c.receipt.config(k);
@@ -100,11 +118,11 @@ fn check(f: &Fixture, hot: bool, c: &Capture) -> Result<(), String> {
                     return Err(format!("{}: PREMISE [config] {k} = {got}, the fixture needs {v}", f.name));
                 }
             }
-            if c.region.iter().all(|p| admits(BACKGROUND, *p)) {
+            let background = display8(words, BACKGROUND_SCENE);
+            if c.region.iter().all(|p| displays(background, *p)) {
                 return Err(format!(
-                    "{}: region empty — every texel is a UNORM conversion of the background constant (per channel {:?})",
-                    f.name,
-                    constant8(BACKGROUND)
+                    "{}: region empty — every texel is the background constant's display under the run's words ({background:?} within {DISPLAY_LSB} LSB)",
+                    f.name
                 ));
             }
             Ok(())
@@ -112,17 +130,29 @@ fn check(f: &Fixture, hot: bool, c: &Capture) -> Result<(), String> {
     }
 }
 
+/// One capture's check, its oracle's inputs logged first (the curve the run's words name).
+fn check_logged(f: &Fixture, hot: bool, c: &Capture) {
+    let words = receipt_post_words(&c.receipt);
+    eprintln!(
+        "{}{}: the run's post_final tonemap word {}; hot oracle {:?}, background {:?}",
+        f.name,
+        if hot { " (hot)" } else { "" },
+        tonemap_word(&words),
+        hot8(words, HOT_R),
+        display8(words, BACKGROUND_SCENE)
+    );
+    if let Err(e) = check(f, hot, c) {
+        panic!("{e}");
+    }
+}
+
 fn drive(name: &str) {
     let f = fixture(name);
     let cold = capture(WORKER, f, false, None);
-    if let Err(e) = check(f, false, &cold) {
-        panic!("{e}");
-    }
+    check_logged(f, false, &cold);
     if f.hot != Hot::None {
         let hot = capture(WORKER, f, true, None);
-        if let Err(e) = check(f, true, &hot) {
-            panic!("{e}");
-        }
+        check_logged(f, true, &hot);
     }
 }
 
@@ -426,61 +456,89 @@ fn the_matrix_reds_a_gap_and_passes_full_coverage() {
     assert!(producer_matrix(&leg_only).is_ok(), "{:?}", producer_matrix(&leg_only).err());
 }
 
-/// The hot oracle is hot: `r = 2.0` through HEAD's tail is above display mid-grey and below white,
-/// and a cold `r = 0.5` differs from it (the "region radiance below 2.0" red a cold fixture gets).
+/// The hot oracle is hot: `r = 2.0` through the default curve's tail is above display mid-grey and
+/// below white, and a cold `r = 0.5` differs from it (the "region radiance below 2.0" red a cold
+/// fixture gets). The oracle follows the curve its words name: ACES Hill and AgX display `r = 2.0`
+/// differently.
 #[test]
 fn the_hot_oracle_separates_hot_from_cold() {
-    let hot = hot8(HOT_R);
-    let cold = hot8(0.5);
-    assert!(hot.iter().all(|v| (200..255).contains(v)), "ACES(2) through the OETF is ≈ 230: {hot:?}");
+    let words = default_post_words();
+    let hot = hot8(words, HOT_R);
+    let cold = hot8(words, 0.5);
+    println!(
+        "the default's words (tonemap word {}): hot {hot:?}, cold {cold:?}, background {:?}",
+        tonemap_word(&words),
+        display8(words, BACKGROUND_SCENE)
+    );
+    assert!(hot.iter().all(|v| (200..255).contains(v)), "the default curve at r = {HOT_R} through the OETF: {hot:?}");
     assert!(hot.iter().zip(&cold).all(|(h, c)| h.abs_diff(*c) > 1), "{hot:?} vs {cold:?}");
-    assert_eq!(constant8(BACKGROUND), [(12, 13), (12, 13), (25, 26)]);
-    assert_eq!(constant8([0.0, 1.0, 0.5]), [(0, 0), (255, 255), (127, 128)], "an integral product has one code");
+    let under = |curve: u32| {
+        let mut w = words;
+        w[ubo_word("mode_words")] = curve << TONEMAP_MODE_SHIFT;
+        hot8(w, HOT_R)
+    };
+    assert_ne!(under(TONEMAP_ACES), under(TONEMAP_AGX), "hot8 does not read the tonemap word of its words");
 }
 
-/// A host [`Capture`] whose region is `n` copies of `texel`, with a `[config]` of `keys`.
+/// A host [`Capture`] whose region is `n` copies of `texel`, with a `[config]` of `keys` and the
+/// default configuration's `post_word0..7` (what a fixture frame records).
 fn synthetic_capture(texel: [u8; 3], n: usize, keys: &[(&str, u64)]) -> Capture {
     let mut text = String::from("[config]\n");
     for (k, v) in keys {
         text.push_str(&format!("{k} = {v}\n"));
     }
+    for (i, w) in default_post_words().iter().enumerate() {
+        text.push_str(&format!("post_word{i} = {w}\n"));
+    }
     Capture { region: vec![texel; n], receipt: Receipt::parse(&text).expect("invariant: a synthetic receipt parses") }
 }
 
+/// `p` moved by `d` codes per channel.
+fn shifted(p: [u8; 3], d: [i16; 3]) -> [u8; 3] {
+    core::array::from_fn(|k| u8::try_from(i16::from(p[k]) + d[k]).expect("invariant: the probe stays inside 0..=255"))
+}
+
 /// **A constant region is judged by the spec's conversion, not by round-half-up** (triage r1 F3):
-/// Vulkan's float → UNORM conversion returns either integer nearest `f · 255` (exactly the integer
-/// when the product is one). The RTX 3060 writes BACKGROUND (`[0.05, 0.05, 0.1]`, blue `0.1 · 255 =
-/// 25.5000004`) as `[13, 13, 25]` (`px0/gl/fixtures.log`, the three constant drivers), which the
-/// round-half-up oracle `[13, 13, 26]` refused; both are permitted, a code two steps off is not.
+/// Vulkan's float → UNORM conversion returns either integer nearest the device's value (the RTX
+/// 3060 wrote the pre-PX1a blue `0.1 · 255 = 25.5000004` as 25, which a round-half-up oracle
+/// refused). Since PX1a that value is `post_final`'s display of the stored constant, so both
+/// neighbours of the oracle's rounded code pass and a code two steps off does not. The codes are
+/// the default curve's display of the constant ([`display8`]), never spelled.
 #[test]
 fn a_constant_region_admits_both_spec_neighbours() {
+    let words = default_post_words();
     for name in ["deferred_base", "forward_sky_base", "forward_lit_clear"] {
         let f = fixture(name);
-        for texel in [[13, 13, 25], [13, 13, 26], [12, 12, 25]] {
+        let Expect::Constant(k) = f.expect else { panic!("{name} is a constant fixture") };
+        let want = display8(words, k);
+        assert!(want.iter().all(|v| (2..=253).contains(v)), "{name}: {want:?} leaves the ±2 probes no room");
+        for d in [[0, 0, 0], [1, 1, -1], [-1, 0, 1]] {
+            let texel = shifted(want, d);
             let c = synthetic_capture(texel, 64, &[]);
-            assert_eq!(check(f, false, &c), Ok(()), "{name}: {texel:?} is a permitted conversion of the background");
+            assert_eq!(check(f, false, &c), Ok(()), "{name}: {texel:?} is a permitted conversion of {want:?}");
         }
-        for texel in [[13, 13, 24], [14, 13, 25], [13, 11, 26]] {
+        for d in [[0, 0, -2], [2, 0, 0], [0, -2, 1]] {
+            let texel = shifted(want, d);
             let c = synthetic_capture(texel, 64, &[]);
-            assert!(check(f, false, &c).is_err(), "{name}: {texel:?} is no conversion of the background");
+            assert!(check(f, false, &c).is_err(), "{name}: {texel:?} is no conversion of {want:?}");
         }
     }
 }
 
 /// **A producer region showing only the background is empty, under the same conversion** (triage
-/// r1 F3): the guard compared with round-half-up `[13, 13, 26]`, so on the RTX 3060 — whose
-/// background is `[13, 13, 25]` — a producer fixture whose region showed nothing but background
-/// passed it. One producer texel in the region clears the guard.
+/// r1 F3): a guard narrower than the device's conversion let a producer fixture whose region showed
+/// nothing but background pass it. One producer texel in the region clears the guard.
 #[test]
 fn a_background_only_producer_region_is_empty() {
     let f = fixture("forward_sky");
     let keys = [("path_is_forward", 1), ("light_sky", 1)];
-    for texel in [[13, 13, 25], [13, 13, 26]] {
+    let background = display8(default_post_words(), BACKGROUND_SCENE);
+    for texel in [background, shifted(background, [1, 0, -1])] {
         let e = check(f, false, &synthetic_capture(texel, 64, &keys)).expect_err("a background-only region must red");
         assert!(e.contains("region empty"), "{texel:?}: {e}");
     }
-    let mut lit = synthetic_capture([13, 13, 25], 64, &keys);
-    lit.region[7] = [90, 120, 200];
+    let mut lit = synthetic_capture(background, 64, &keys);
+    lit.region[7] = background.map(|v| v.wrapping_add(128));
     assert_eq!(check(f, false, &lit), Ok(()));
 }
 
