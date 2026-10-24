@@ -679,7 +679,7 @@ It becomes a candidate only after PX3 ships and a scene shows the need.
   evaluated in the bake.
 
 **The default curve** is an owner value (§13 V2). It stays ACES Hill, today's look, until the owner
-chooses.
+chooses. *(Superseded 2026-10-24, ruling 116: the default is Khronos PBR Neutral — the owner's 2026-10-11 choice of AgX at PXt (§13 Q2, AD-5) was superseded in turn; ACES Hill and AgX ship selectable.)*
 
 ### 5.7 Bloom — the 13-tap / tent pyramid; no X-SPD, no FFT
 
@@ -1435,7 +1435,7 @@ PX12. PX13–PX17 and PU follow owner scope or measurement. The order is chosen 
 2. **The default tonemap curve.** The choices are ACES Hill (today's look; hue-shifting, T14),
    Khronos Neutral, Reinhard-Jodie, AgX (**subject to a licence you confirm**; otherwise an
    in-house AgX-like curve) or Tony McMapface (T15). Recommended: keep ACES until you have seen
-   them all on the golden scenes after PX5.
+   them all on the golden scenes after PX5. *(Decided: Q2 below; since 2026-10-24, ruling 116, the default is Khronos PBR Neutral.)*
 3. **The shipped look preset for a new camera.** Which of auto-exposure, bloom, vignette and grain
    are on by default, and what `compensation_ev` is? Note that `Auto` on today's scenes lands
    about 2.3 EV darker than exposure 1.0 [E] (§5.4). Dither is decided (D9). Recommended: all off,

@@ -1813,12 +1813,15 @@ mod tests {
 
     #[test]
     fn tonemap_mode_bits_are_independent_of_the_shadow_gate_bits() {
-        let cfg = LightingConfig { tonemapper: Tonemapper::Neutral, ..LightingConfig::default() };
+        // A curve other than the default's (render wave PXt, ruling 116: the default is Khronos PBR
+        // Neutral), so a packer that kept the default's word instead of the config's is red.
+        let cfg = LightingConfig { tonemapper: Tonemapper::AgX, ..LightingConfig::default() };
+        assert_ne!(cfg.tonemapper, Tonemapper::default(), "PREMISE: the config names a curve other than the default's");
         let h = LightHeaderGpu::new(1, 0, &cfg, 1.0);
         let word7 = h.sky_diffuse[3].to_bits();
         assert_eq!(
             (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
-            Tonemapper::Neutral as u32
+            Tonemapper::AgX as u32
         );
         // Bits 0..4 (shadow/contact/CSM/punctual/DDGI gates) must stay untouched.
         assert_eq!(word7 & 0x1F, 0, "tonemap mode must not touch the shadow/GI gate bits 0..4");

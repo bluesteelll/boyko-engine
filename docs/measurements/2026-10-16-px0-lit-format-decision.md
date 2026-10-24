@@ -928,7 +928,7 @@ here.
 5. **Row 4, the escape's own check:** the outcome is RGBA16F, and 0 of the 42 RGBA16F decisive arms
    fail. **Row 4 does not fire, and the wave continues.**
 6. **Rows 5 and 6:** row 5 is void (Q1 = yes). Row 6 covers a later change of the default curve.
-   The decided curve in §5 stays AgX.
+   The decided curve in §5 stays AgX *(amended by §10, ruling 116)*.
 
 **One reading to state.** The table's "classes of the decisive paths" are read on B10G11R11, the
 format under test; RGBA16F is row 4's escape. The probe's `decide()` reads them the same way.
