@@ -37,14 +37,37 @@
 //! - `the_no_rcas_twin_compiles_the_sharpen_branch_away` (host; SKIPS without `dxc` — a skipped
 //!   run is not a pass): the anti-vacuity — the twin's bytes differ from the committed module, it
 //!   carries ONE `OpImageFetch` against the uber module's five and one `DontFlatten` selection fewer.
-//! - `post_final_uber_and_no_rcas_twin_registers_agree` (`gpu-cap:`): rule (xviii)'s thresholds —
-//!   the statistic NAMES agree, every register statistic of the uber module is at most
+//! - `post_final_sharpen_off_module_and_no_rcas_twin_registers_agree` (`gpu-cap:`; PX1b's
+//!   `post_final_uber_and_no_rcas_twin_registers_agree`, re-aimed by render wave PXt): rule
+//!   (xviii)'s thresholds — the statistic NAMES agree, every register statistic of the module a
+//!   sharpen-off frame binds (`compute::post_final_spirv_for(false)`) is at most
 //!   [`REGISTER_DELTA_MAX`] above the twin's, every occupancy statistic is equal where reported; no
-//!   absolute count. It re-checks the anti-vacuity itself, and it PANICS where it cannot measure
-//!   (no `dxc`, no loader, no device exposing the extension, no register statistic): a gated row
-//!   that skipped is red, never green (critique W2 item 3). A red row is a PX1b defect fixed as the
-//!   next render rung, rule (xviii)'s "no revert, no merge hold"; its priced escape is a second
-//!   `post_final` pipeline chosen per frame by the host.
+//!   absolute count. It re-checks the twin's anti-vacuity itself, and it PANICS where it cannot
+//!   measure (no `dxc`, no loader, no device exposing the extension, no register statistic): a gated
+//!   row that skipped is red, never green (critique W2 item 3). PX1b measured the uber module at 36
+//!   registers against the twin's 18 (OPEN-ITEMS 19); the priced escape — a second `post_final`
+//!   pipeline chosen per frame by the host — is render wave PXt's.
+//!
+//! # Render wave PXt — the sharpen-off module (OPEN-ITEMS 19, `pxt/cut.md` D-O1…D-O4)
+//!
+//! - `the_sharpen_off_module_is_the_body_without_rcas` (host): (a) the module a sharpen-off frame
+//!   binds carries ONE `OpImageFetch` and one `DontFlatten` selection fewer than the sharpen-on
+//!   module, and different bytes — the anti-vacuity of the register gate above.
+//! - `the_committed_sharpen_off_module_is_the_no_rcas_twin` (host; SKIPS without `dxc`): (b) that
+//!   module IS the `NoRcas` twin, instruction for instruction once the debug-only instructions are
+//!   dropped. So, once it holds, the register gate above compares the twin with itself and reds
+//!   only where (b) does (critique O3): it is not an independent measurement of "zero cost when
+//!   off" — (a) and (b) are, and the gate stays as the device-side row of rule (xviii).
+//! - `the_agx_twin_compiles_the_arm_away` (host) and `post_final_agx_arm_registers_agree`
+//!   (`gpu-cap:`): rule (xviii) on the AgX arm (critique W3) — both shipped modules (the sharpen-off
+//!   default row and the RCAS heaviest) against themselves with the arm compiled out (the generated
+//!   text's AgX dispatch test made `if (false)`, the `-D <BODY>=0` of a generated module),
+//!   anti-vacuity on the arm's `Log2` / `Pow` / `DontFlatten`.
+//! - Recorded, not gated (`gpu-cap:`): `post_final_sharpen_on_and_off_modules_report_their_registers`
+//!   (the cost when the sharpen is on) and
+//!   `post_final_sharpen_off_and_agx_only_twin_report_their_register_footprint` (O6 on AgX's path,
+//!   the default curve's from PXt's C8 until ruling 116 made Neutral the default; its host
+//!   anti-vacuity is `the_agx_only_twin_compiles_the_other_arms_away`).
 //!
 //! # Usage
 //!
@@ -63,7 +86,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::ptr;
 
-use boyko_rhi_vulkan::compute::post_final_spirv;
+use boyko_rhi_vulkan::compute::{post_final_spirv, post_final_spirv_for};
 use boyko_shaderdsl::emit::{PostFinalTwin, emit_post_final_comp_with};
 use boyko_rhi_vulkan::ffi::{
     VkExtensionProperties, VkPhysicalDeviceProperties, VkQueueFamilyProperties, os,
@@ -542,9 +565,15 @@ fn compile_twin(dxc: &PathBuf) -> Vec<u32> {
 
 /// `twin`, DXC'd under the frozen recipe into scratch files named after `stem`.
 fn compile_twin_of(dxc: &PathBuf, twin: PostFinalTwin, stem: &str) -> Vec<u32> {
+    compile_source(dxc, &emit_post_final_comp_with(twin), stem)
+}
+
+/// `source` (a whole `post_final` module), DXC'd under the frozen recipe into scratch files named
+/// after `stem`.
+fn compile_source(dxc: &PathBuf, source: &str, stem: &str) -> Vec<u32> {
     let hlsl = child_guard::scratch_path(&format!("{stem}.comp.hlsl"));
     let spv = child_guard::scratch_path(&format!("{stem}.comp.spv"));
-    std::fs::write(&hlsl, emit_post_final_comp_with(twin)).expect("invariant: the scratch dir accepts the twin's source");
+    std::fs::write(&hlsl, source).expect("invariant: the scratch dir accepts the twin's source");
     let status = Command::new(dxc)
         .args(["-spirv", "-T", "cs_6_0", "-E", "main", "-fspv-target-env=vulkan1.3"])
         .arg(&hlsl)
@@ -552,7 +581,7 @@ fn compile_twin_of(dxc: &PathBuf, twin: PostFinalTwin, stem: &str) -> Vec<u32> {
         .arg(&spv)
         .status_within(DXC_DEADLINE)
         .expect("invariant: dxc was located and must run");
-    assert!(status.success(), "dxc failed on the {twin:?} twin under post_final's frozen recipe");
+    assert!(status.success(), "dxc failed on the `{stem}` twin under post_final's frozen recipe");
     let bytes = std::fs::read(&spv).expect("invariant: dxc wrote the twin's .spv");
     let _ = std::fs::remove_file(&hlsl);
     let _ = std::fs::remove_file(&spv);
@@ -642,6 +671,59 @@ fn the_no_rcas_twin_compiles_the_sharpen_branch_away() {
     );
 }
 
+// ---- Render wave PXt — the module a sharpen-off frame binds (OPEN-ITEMS 19, `pxt/cut.md` D-O4) ----
+
+/// **(a)** The module a sharpen-off frame binds (`post_final_spirv_for(false)`) is the body without
+/// RCAS: ONE `OpImageFetch` (the scene texel), one `DontFlatten` selection fewer than the module a
+/// sharpen-on frame binds, and different bytes — the anti-vacuity of the sharpen-off register gate
+/// below (host, no `dxc`).
+#[test]
+fn the_sharpen_off_module_is_the_body_without_rcas() {
+    let (on, off) = (post_final_spirv_for(true), post_final_spirv_for(false));
+    let fetches = image_fetch_count(off);
+    assert_eq!(fetches, 1, "post_final_spirv_for(false) carries {fetches} OpImageFetch, not 1 — a sharpen-off frame binds the RCAS body (OPEN-ITEMS 19)");
+    assert_eq!(image_fetch_count(on), 5, "post_final_spirv_for(true) must carry RCAS's four ring taps beside the scene texel");
+    assert_eq!(dont_flatten_count(off) + 1, dont_flatten_count(on), "the sharpen-off module must carry exactly one DontFlatten selection fewer (the sharpen stage's)");
+    assert!(on != off, "the two modules must differ");
+}
+
+/// The SPIR-V words a driver compiles: the module without its debug-only instructions (`OpSource*`,
+/// `OpString`, `OpName`, `OpMemberName`, `OpLine`, `OpNoLine`, `OpModuleProcessed`), header kept.
+fn semantic_words(words: &[u32]) -> Vec<u32> {
+    const DEBUG_OPS: [u32; 9] = [2, 3, 4, 5, 6, 7, 8, 317, 330];
+    let mut out = words[..5].to_vec();
+    let mut i = 5; // past the header
+    while i < words.len() {
+        let (count, op) = ((words[i] >> 16) as usize, words[i] & 0xFFFF);
+        assert!(count > 0, "a zero-length SPIR-V instruction at word {i}");
+        if !DEBUG_OPS.contains(&op) {
+            out.extend_from_slice(&words[i..i + count]);
+        }
+        i += count;
+    }
+    out
+}
+
+/// **(b)** The module a sharpen-off frame binds IS the body-out twin: the test-only `NoRcas`
+/// emission, DXC'd under the frozen recipe, equals `post_final_spirv_for(false)` instruction for
+/// instruction once the debug-only instructions are dropped — on every device, without a driver's
+/// fold. SKIPS without `dxc` (a skipped run is not a pass).
+#[test]
+fn the_committed_sharpen_off_module_is_the_no_rcas_twin() {
+    let Some(dxc) = find_dxc() else {
+        eprintln!("SKIP post_final_occupancy: no dxc resolves on this host — a skipped run is NOT a pass");
+        return;
+    };
+    let twin = compile_twin_of(&dxc, PostFinalTwin::NoRcas, "post_final_no_rcas");
+    let off = post_final_spirv_for(false);
+    assert!(
+        semantic_words(off) == semantic_words(&twin),
+        "post_final_spirv_for(false) ({} words) is not the NoRcas twin ({} words) — a sharpen-off frame does not bind the body without RCAS (OPEN-ITEMS 19)",
+        off.len(),
+        twin.len()
+    );
+}
+
 /// A statistic's numeric value (`None` for a boolean).
 fn stat_number(v: &StatValue) -> Option<f64> {
     match *v {
@@ -652,10 +734,11 @@ fn stat_number(v: &StatValue) -> Option<f64> {
     }
 }
 
-/// Rule (xviii)'s thresholds on two reports (the uber module, its NoRcas twin): `Err(why)` when the
-/// statistic names differ, when no statistic names a register count (the row could not measure),
-/// when a register statistic of the uber module exceeds the twin's by more than
-/// [`REGISTER_DELTA_MAX`], or when an occupancy statistic differs. No absolute count is asserted.
+/// Rule (xviii)'s thresholds on two reports (a shipped module, its register twin with one
+/// runtime-gated body compiled out): `Err(why)` when the statistic names differ, when no statistic
+/// names a register count (the row could not measure), when a register statistic of the shipped
+/// module exceeds the twin's by more than [`REGISTER_DELTA_MAX`], or when an occupancy statistic
+/// differs. No absolute count is asserted.
 fn registers_agree(uber: &[(String, StatValue)], twin: &[(String, StatValue)]) -> Result<String, String> {
     let names = |r: &[(String, StatValue)]| {
         let mut n: Vec<String> = r.iter().map(|(k, _)| k.clone()).collect();
@@ -677,12 +760,12 @@ fn registers_agree(uber: &[(String, StatValue)], twin: &[(String, StatValue)]) -
             seen_register = true;
             report.push(format!("{name}: uber {u}, twin {t}, delta {}", u - t));
             if u - t > REGISTER_DELTA_MAX {
-                return Err(format!("`{name}`: the uber module uses {u}, the NoRcas twin {t} — delta {} > {REGISTER_DELTA_MAX}", u - t));
+                return Err(format!("`{name}`: the shipped module uses {u}, the twin {t} — delta {} > {REGISTER_DELTA_MAX}", u - t));
             }
         } else if lower.contains("occupancy") {
             report.push(format!("{name}: uber {uv}, twin {tv}"));
             if stat_number(uv) != stat_number(tv) {
-                return Err(format!("`{name}`: the uber module's {uv} differs from the NoRcas twin's {tv}"));
+                return Err(format!("`{name}`: the shipped module's {uv} differs from the twin's {tv}"));
             }
         }
     }
@@ -692,19 +775,22 @@ fn registers_agree(uber: &[(String, StatValue)], twin: &[(String, StatValue)]) -
     Ok(report.join("; "))
 }
 
-/// **Render wave PX1b — the register twin, GATED.** See the module doc.
+/// **Render wave PX1b — the register twin, GATED; render wave PXt — re-aimed at the module a
+/// sharpen-off frame binds** (OPEN-ITEMS 19, `pxt/cut.md` D-O4 (c)): `post_final_spirv_for(false)`
+/// against the `NoRcas` twin. The twin's anti-vacuity is taken against the RCAS module (it folds
+/// the sharpen branch: 5 → 1 `OpImageFetch`). See the module doc.
 #[test]
-#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties and the pinned dxc; PX1b D-R10 (3), the post_final register twin GATED by rule (xviii) (a run that cannot measure panics); run with --nocapture"]
-fn post_final_uber_and_no_rcas_twin_registers_agree() {
+#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties and the pinned dxc; PX1b D-R10 (3) re-aimed at PXt's sharpen-off module, the post_final register twin GATED by rule (xviii) (a run that cannot measure panics); run with --nocapture"]
+fn post_final_sharpen_off_module_and_no_rcas_twin_registers_agree() {
     let dxc = find_dxc().expect("GATE post_final_occupancy: no dxc resolves on this host — the gated row cannot measure, so it is red");
     let twin = compile_twin_of(&dxc, PostFinalTwin::NoRcas, "post_final_no_rcas");
-    let uber = post_final_spirv();
-    if let Err(why) = no_rcas_anti_vacuity(uber, &twin) {
+    if let Err(why) = no_rcas_anti_vacuity(post_final_spirv_for(true), &twin) {
         panic!("{why}");
     }
+    let off = post_final_spirv_for(false);
     let probe = VulkanProbe::open()
         .expect("GATE post_final_occupancy: the probe could not open a device with VK_KHR_pipeline_executable_properties (the SKIP line above says why) — the gated row cannot measure, so it is red");
-    let reports = probe.measure(&[("uber (committed)", uber), ("no_rcas (twin)", twin.as_slice())]);
+    let reports = probe.measure(&[("sharpen-off (committed)", off), ("no_rcas (twin)", twin.as_slice())]);
     println!("\n=== post_final register twin (PX1b D-R10 (3), GATED by rule (xviii)) ===");
     println!("device: {}", probe.device_name);
     for r in &reports {
@@ -735,6 +821,242 @@ fn the_register_gate_rejects_its_fixtures() {
     let blind = row(&[("Binary Size", 900)]);
     assert!(registers_agree(&blind, &blind).is_err(), "a report with no register statistic cannot gate, so it is red");
     assert!(registers_agree(&row(&[("Register Count", 24)]), &row(&[("Register Count", 40)])).is_ok(), "the uber module using FEWER registers is not a cost");
+}
+
+// ---- Render wave PXt — the AgX arm's register twin (rule (xviii); `pxt/critique.md` W3) -----------
+
+/// The AgX dispatch test as the generator prints it (`post::tonemap_select`'s first arm).
+const AGX_DISPATCH_TEST: &str = "if (post_tonemap_mode == TONEMAP_AGX) {";
+
+/// `GLSL.std.450 Pow`.
+const GLSL_POW: u32 = 26;
+/// `GLSL.std.450 Log2`.
+const GLSL_LOG2: u32 = 30;
+
+/// Rule (xviii)'s `-D <BODY>=0` for a GENERATED module (the printer has no preprocessor node): the
+/// module's text with its AgX dispatch test made `if (false)`, so DXC folds the AgX arm away while
+/// the other arms keep reading the runtime word. `Err` unless the test occurs exactly once.
+fn without_the_agx_arm(text: &str) -> Result<String, String> {
+    match text.matches(AGX_DISPATCH_TEST).count() {
+        1 => Ok(text.replacen(AGX_DISPATCH_TEST, "if (false) {", 1)),
+        n => Err(format!(
+            "the AgX dispatch test `{AGX_DISPATCH_TEST}` occurs {n} times in the module (want 1): there is no AgX arm to compile out"
+        )),
+    }
+}
+
+/// The `GLSL.std.450` extended instructions numbered `inst` in a SPIR-V module.
+fn glsl_ext_count(words: &[u32], inst: u32) -> usize {
+    let mut glsl = None;
+    let mut i = 5; // past the header
+    let mut n = 0;
+    while i < words.len() {
+        let (count, op) = ((words[i] >> 16) as usize, words[i] & 0xFFFF);
+        assert!(count > 0, "a zero-length SPIR-V instruction at word {i}");
+        if op == 11 && count >= 3 {
+            // OpExtInstImport: <result id> <name, NUL-terminated, little-endian words>.
+            let name: Vec<u8> = words[i + 2..i + count].iter().flat_map(|w| w.to_le_bytes()).take_while(|b| *b != 0).collect();
+            if name == b"GLSL.std.450" {
+                glsl = Some(words[i + 1]);
+            }
+        } else if op == 12 && count >= 5 && Some(words[i + 3]) == glsl && words[i + 4] == inst {
+            // OpExtInst: <type> <result> <set> <instruction> <operands...>.
+            n += 1;
+        }
+        i += count;
+    }
+    n
+}
+
+/// `Err(why)` unless `twin` is `shipped` with the AgX arm compiled out — rule (xviii)'s anti-vacuity
+/// on the arm's named marker ops: different bytes; `GLSL.std.450 Log2` 3 → 0 (the arm's three
+/// `log2`, the module's only ones); `Pow` exactly three fewer (the arm's `pow(·, 2.2)`; the OETF's
+/// three stay); one `DontFlatten` selection fewer (the arm's dispatch level).
+fn agx_arm_anti_vacuity(shipped: &[u32], twin: &[u32]) -> Result<(), String> {
+    if twin == shipped {
+        return Err("the AgX twin's SPIR-V equals the shipped module: the two columns would be one kernel".to_string());
+    }
+    let (sl, tl) = (glsl_ext_count(shipped, GLSL_LOG2), glsl_ext_count(twin, GLSL_LOG2));
+    if (sl, tl) != (3, 0) {
+        return Err(format!("GLSL.std.450 Log2: shipped {sl}, AgX twin {tl} (want 3 and 0): the AgX arm was not compiled out"));
+    }
+    let (sp, tp) = (glsl_ext_count(shipped, GLSL_POW), glsl_ext_count(twin, GLSL_POW));
+    if sp != tp + 3 {
+        return Err(format!("GLSL.std.450 Pow: shipped {sp}, AgX twin {tp} (want exactly three fewer)"));
+    }
+    let (sd, td) = (dont_flatten_count(shipped), dont_flatten_count(twin));
+    if td + 1 != sd {
+        return Err(format!("DontFlatten selections: shipped {sd}, AgX twin {td} (want exactly one fewer)"));
+    }
+    Ok(())
+}
+
+/// The shipped `post_final` modules that carry the AgX arm, each with its generated source and its
+/// committed SPIR-V: `(label, source, spirv)` — rule (xviii)'s "default row and heaviest" of the
+/// shared row: the sharpen-off module (most frames) and the RCAS module.
+fn agx_rows() -> Vec<(&'static str, String, &'static [u32])> {
+    vec![
+        ("post_final (committed)", boyko_shaderdsl::emit::emit_post_final_comp(), post_final_spirv_for(true)),
+        (
+            "post_final_nosharpen (committed)",
+            boyko_shaderdsl::emit::emit_post_final_nosharpen_comp(),
+            post_final_spirv_for(false),
+        ),
+    ]
+}
+
+/// **Render wave PXt — the AgX arm's twin is the shipped module with the arm compiled out** (host;
+/// the substitution is checked without `dxc`, the compiled twin SKIPS without it — a skipped run is
+/// not a pass). Red-first: the shipped module itself, as its own twin, is rejected.
+#[test]
+fn the_agx_twin_compiles_the_arm_away() {
+    for (label, source, shipped) in agx_rows() {
+        let twin_text = without_the_agx_arm(&source).unwrap_or_else(|why| panic!("{label}: {why}"));
+        let Some(dxc) = find_dxc() else {
+            eprintln!("SKIP post_final_occupancy: no dxc resolves on this host — a skipped run is NOT a pass");
+            return;
+        };
+        let twin = compile_source(&dxc, &twin_text, "post_final_no_agx");
+        if let Err(why) = agx_arm_anti_vacuity(shipped, &twin) {
+            panic!("{label}: {why}");
+        }
+        assert!(agx_arm_anti_vacuity(shipped, shipped).is_err(), "{label}: the anti-vacuity must reject the shipped module as its own twin");
+        eprintln!(
+            "post_final_occupancy: {label}: Log2 {} vs {}, Pow {} vs {}, DontFlatten {} vs {} (shipped vs no_agx twin)",
+            glsl_ext_count(shipped, GLSL_LOG2),
+            glsl_ext_count(&twin, GLSL_LOG2),
+            glsl_ext_count(shipped, GLSL_POW),
+            glsl_ext_count(&twin, GLSL_POW),
+            dont_flatten_count(shipped),
+            dont_flatten_count(&twin)
+        );
+    }
+}
+
+/// **Render wave PXt — the AgX arm's register twin, GATED by rule (xviii)** (`pxt/critique.md` W3):
+/// every shipped module against itself with the AgX arm compiled out — the arm's register cost on
+/// every path that does not run it (ACES Hill, Neutral, Reinhard-Jodie). Panics where it cannot
+/// measure.
+#[test]
+#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties and the pinned dxc; PXt rule (xviii), the AgX arm's register twin GATED (a run that cannot measure panics); run with --nocapture"]
+fn post_final_agx_arm_registers_agree() {
+    let dxc = find_dxc().expect("GATE post_final_occupancy: no dxc resolves on this host — the gated row cannot measure, so it is red");
+    let probe = VulkanProbe::open()
+        .expect("GATE post_final_occupancy: the probe could not open a device with VK_KHR_pipeline_executable_properties (the SKIP line above says why) — the gated row cannot measure, so it is red");
+    println!("\n=== post_final AgX arm register twin (PXt, GATED by rule (xviii)) ===");
+    println!("device: {}", probe.device_name);
+    let mut red = Vec::new();
+    for (label, source, shipped) in agx_rows() {
+        let twin_text = without_the_agx_arm(&source).unwrap_or_else(|why| panic!("GATE red: {label}: {why}"));
+        let twin = compile_source(&dxc, &twin_text, "post_final_no_agx");
+        if let Err(why) = agx_arm_anti_vacuity(shipped, &twin) {
+            panic!("GATE red: {label}: {why}");
+        }
+        let reports = probe.measure(&[(label, shipped), ("no_agx (twin)", twin.as_slice())]);
+        for r in &reports {
+            println!("\n[{}] {} SPIR-V words, executable \"{}\", subgroupSize {}", r.label, r.spirv_words, r.executable_name, r.subgroup_size);
+            for (name, value) in &r.stats {
+                println!("    {name:.<44} {value}");
+            }
+        }
+        assert_eq!(reports.len(), 2, "{label}: both modules must have compiled");
+        for r in &reports {
+            assert!(!r.stats.is_empty(), "[{}] the driver returned no statistics — the CAPTURE_STATISTICS bit did not take effect", r.label);
+        }
+        match registers_agree(&reports[0].stats, &reports[1].stats) {
+            Ok(summary) => println!("\nGATE green ({label}): {summary}"),
+            Err(why) => red.push(format!("{label}: {why}")),
+        }
+    }
+    assert!(red.is_empty(), "GATE red: {}", red.join("; "));
+}
+
+/// **Render wave PXt — the O6 row re-aimed** (`pxt/cut.md` D-O4 (d)): the `AgxOnly` twin (the mode
+/// word the AgX constant, the sharpen bit clear) is the sharpen-off module with the other three
+/// arms compiled out — the dispatch folded to AgX's arm (its three `Log2` kept, no `DontFlatten`
+/// left) and different bytes. SKIPS without `dxc`.
+#[test]
+fn the_agx_only_twin_compiles_the_other_arms_away() {
+    let twin_text = emit_post_final_comp_with(PostFinalTwin::AgxOnly);
+    assert!(twin_text.starts_with("// TEST-ONLY O6 TWIN (PostFinalTwin::AgxOnly)"), "the twin says what it is");
+    let Some(dxc) = find_dxc() else {
+        eprintln!("SKIP post_final_occupancy: no dxc resolves on this host — a skipped run is NOT a pass");
+        return;
+    };
+    let twin = compile_twin_of(&dxc, PostFinalTwin::AgxOnly, "post_final_agx_only");
+    let off = post_final_spirv_for(false);
+    assert!(twin.as_slice() != off, "the AgxOnly twin's SPIR-V equals the sharpen-off module: the two columns would be one kernel");
+    assert_eq!(dont_flatten_count(&twin), 0, "the AgxOnly twin keeps a DontFlatten selection: the dispatch was not folded");
+    assert_eq!(glsl_ext_count(&twin, GLSL_LOG2), 3, "the AgxOnly twin must keep AgX's three Log2 (the arm it folds to)");
+    eprintln!(
+        "post_final_occupancy: DontFlatten sharpen-off {}, agx_only twin {}; SPIR-V words {} vs {}",
+        dont_flatten_count(off),
+        dont_flatten_count(&twin),
+        off.len(),
+        twin.len()
+    );
+}
+
+/// Prints two modules' driver statistics side by side and asserts the mechanical conditions under
+/// which the columns mean anything (both compiled, each reported statistics, the statistic NAMES
+/// agree). RECORDED, NOT GATED — no threshold, no register count is asserted.
+fn record_pair(title: &str, probe: &VulkanProbe, modules: &[(&'static str, &[u32]); 2]) {
+    let reports = probe.measure(modules);
+    println!("\n=== {title} (recorded, not gated) ===");
+    println!("device: {}", probe.device_name);
+    for r in &reports {
+        println!("\n[{}] {} SPIR-V words, executable \"{}\", subgroupSize {}", r.label, r.spirv_words, r.executable_name, r.subgroup_size);
+        for (name, value) in &r.stats {
+            println!("    {name:.<44} {value}");
+        }
+    }
+    assert_eq!(reports.len(), 2, "both modules must have compiled");
+    for r in &reports {
+        assert!(!r.stats.is_empty(), "[{}] the driver returned no statistics — the CAPTURE_STATISTICS bit did not take effect", r.label);
+    }
+    let names_of = |r: &ModuleReport| -> Vec<String> {
+        let mut n: Vec<String> = r.stats.iter().map(|(k, _)| k.clone()).collect();
+        n.sort();
+        n
+    };
+    assert_eq!(names_of(&reports[1]), names_of(&reports[0]), "the two modules report different statistic SETS — the columns are not comparable");
+}
+
+/// **Render wave PXt — the cost when the sharpen is on** (`pxt/cut.md` D-O4 (d)): the RCAS module
+/// beside the sharpen-off module. See [`record_pair`].
+#[test]
+#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties; PXt OPEN-ITEMS 19, post_final's sharpen-on and sharpen-off modules' register footprint (recorded, not gated); run with --nocapture"]
+fn post_final_sharpen_on_and_off_modules_report_their_registers() {
+    let Some(probe) = VulkanProbe::open() else {
+        return;
+    };
+    record_pair(
+        "post_final sharpen-on vs sharpen-off modules (PXt, OPEN-ITEMS 19)",
+        &probe,
+        &[("sharpen-on (post_final)", post_final_spirv_for(true)), ("sharpen-off (post_final_nosharpen)", post_final_spirv_for(false))],
+    );
+}
+
+/// **Render wave PXt — the O6 row on AgX's path** (`pxt/cut.md` D-O4 (d); the default curve's path
+/// from C8 until ruling 116 made Khronos PBR Neutral the default): the sharpen-off module beside its
+/// `AgxOnly` twin — the runtime dispatch's register cost where AgX runs. The PX1a `AcesOnly` row
+/// stays for continuity. See [`record_pair`].
+#[test]
+#[ignore = "gpu-cap: needs a real GPU exposing VK_KHR_pipeline_executable_properties and the pinned dxc; PXt O6, post_final's sharpen-off module vs its AgxOnly twin (recorded, not gated); run with --nocapture"]
+fn post_final_sharpen_off_and_agx_only_twin_report_their_register_footprint() {
+    let Some(dxc) = find_dxc() else {
+        eprintln!("SKIP post_final_occupancy: no dxc resolves on this host — a skipped run is NOT a pass");
+        return;
+    };
+    let twin = compile_twin_of(&dxc, PostFinalTwin::AgxOnly, "post_final_agx_only");
+    let Some(probe) = VulkanProbe::open() else {
+        return;
+    };
+    record_pair(
+        "post_final O6 on AgX's path: sharpen-off module vs AgxOnly twin (PXt)",
+        &probe,
+        &[("sharpen-off (committed)", post_final_spirv_for(false)), ("agx_only (twin)", twin.as_slice())],
+    );
 }
 
 /// The twin is the committed body with the dispatch compiled out: the generator prints the same

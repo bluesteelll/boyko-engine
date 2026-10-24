@@ -131,15 +131,16 @@ At the end of the resolve the accumulated linear radiance is multiplied by
 
 | `Tonemapper` | Character |
 |--------------|-----------|
-| `Aces` (default) | Stephen Hill's fitted ACES curve. |
-| `Neutral` | Khronos PBR Neutral: hue-preserving, gentle toe, no shadow crush. |
-| `ReinhardJodie` | A cheap hue-preserving Reinhard variant. |
+| `Neutral` (default) | Khronos PBR Neutral: LUT-free, hue-preserving, gentle toe, no shadow crush. A base color in `[0.08, 0.8]` displays as authored. |
+| `Aces` | Stephen Hill's fitted ACES curve. |
+| `AgX` | three.js's formulation of Blender's AgX: a bright saturated color whitens with little hue skew. |
+| `ReinhardJodie` | A cheap Reinhard variant. It is not hue-preserving: bright saturated colors shift hue. |
 
 ```rust,ignore
 use boyko_render::{LightingConfig, Tonemapper};
 
 app.insert_resource(LightingConfig {
-    tonemapper: Tonemapper::Neutral,
+    tonemapper: Tonemapper::Aces,
     exposure: 1.2,
     ..LightingConfig::default()
 });

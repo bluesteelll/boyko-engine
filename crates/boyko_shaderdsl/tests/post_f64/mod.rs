@@ -17,8 +17,21 @@
 //! difference is added. Because the bound scales with the conditioning of each step, a correct
 //! leaf stays green where a fixed ULP count would be red (`aces_hill` near its numerator root,
 //! where the output cancels to ≈ 0).
+//!
+//! **AgX (render wave PXt, DS-H6).** The VALUE reference is render wave PX0's independent
+//! transcription of three.js's `AgXToneMapping` ([`agx_f64`], included by path — one transcription
+//! for the `lit` format decision and for the leaf). [`agx_tracked`] bounds an f32 evaluation of the
+//! LEAF's operation sequence (one fused input matrix, the log encoding as a multiply, the sigmoid by
+//! Horner); it reads `agx_f64`'s four matrices and spells only the sigmoid's coefficients, and the
+//! tests hold its value to `agx_f64` within `1e-12`, so a slip in the twin fails there rather than
+//! loosening the leaf comparison.
 
 #![allow(dead_code)] // each including test file uses the subset it needs
+
+/// Render wave PX0's `f64` AgX transcription (three.js `AgXToneMapping`), shared with
+/// `boyko_rhi_vulkan`'s `lit_format` model: PXt's host test 1 reference (DS-H6).
+#[path = "../../../boyko_rhi_vulkan/tests/lit_format/agx_f64.rs"]
+pub mod agx_f64;
 
 /// The f32 unit roundoff `2⁻²⁴`.
 pub const U: f64 = 1.0 / 16_777_216.0;
@@ -97,6 +110,57 @@ impl Tracked {
     /// `−self` (exact).
     pub fn neg(self) -> Self {
         Tracked { v: -self.v, b: self.b }
+    }
+
+    /// `log2(self)`, as the f32 `log2` of an input within `b` of `v` (render wave PXt): the
+    /// propagated `b / ((v − b)·ln 2)` — the derivative's largest value over `[v − b, v + b]` — plus
+    /// 2 ULP of the result for the f32 function's own error, plus `2⁻¹²⁶`.
+    ///
+    /// # Panics
+    /// Where `v − b ≤ 0`: the input may then be 0, where `log2` has no bound.
+    pub fn log2(self) -> Self {
+        self.log2_above(0.0)
+    }
+
+    /// [`Tracked::log2`] of an input the f32 evaluation never lets below `lower` (the output of a
+    /// `max(·, lower)`): the derivative is taken over `[max(v − b, lower), v + b]`, so a floored input
+    /// whose own bound reaches past the floor — a mis-composed reference's negative channel — keeps a
+    /// finite bound.
+    ///
+    /// # Panics
+    /// Where that interval reaches 0.
+    pub fn log2_above(self, lower: f64) -> Self {
+        let lo = (self.v - self.b).max(lower);
+        assert!(lo > 0.0, "log2 of {self:?}: the input is within its own bound of 0 — the reference cannot bound this row");
+        let r = self.v.log2();
+        Tracked { v: r, b: self.b / (lo * core::f64::consts::LN_2) + 2.0 * ulp32(r) + FLOOR }
+    }
+
+    /// `pow(self, p)` as the f32 `pow` of an input within `b` of `v`, with the exponent rounded to
+    /// f32 (render wave PXt). The value is the exact `v^p`. The bound is the propagated
+    /// `p·(v + b)^(p − 1)·b` (the derivative's largest value over the interval, `p ≥ 1`), plus the
+    /// exponent's rounding `sup t^p·|ln t| · |f32(p) − p|` over `[max(v − b, 0), v + b]`, plus 2 ULP of
+    /// the result for the f32 `pow`, plus `2⁻¹²⁶`.
+    ///
+    /// `t^p·|ln t|` is taken as its limit, 0, at `t = 0` (`pxt/critique.md` W1): an input clamped to
+    /// zero — every dark AgX channel after `max(d, 0)` — keeps a finite bound instead of `∞·0`.
+    ///
+    /// # Panics
+    /// When `v < 0` or `p < 1` (the bound assumes both), or when the bound is not finite.
+    pub fn powf(self, p: f64) -> Self {
+        assert!(self.v >= 0.0 && p >= 1.0, "powf({self:?}, {p}): the bound needs v ≥ 0 and p ≥ 1");
+        let r = self.v.powf(p);
+        let (lo, hi) = ((self.v - self.b).max(0.0), self.v + self.b);
+        let g = |t: f64| if t > 0.0 { t.powf(p) * t.ln().abs() } else { 0.0 };
+        // `t^p·|ln t|` rises to its one maximum on (0, 1) at `e^(−1/p)`, falls to 0 at 1, then
+        // rises again: its supremum over [lo, hi] is at an end or at that peak.
+        let peak = (-1.0 / p).exp();
+        let interior = if (lo..=hi).contains(&peak) { g(peak) } else { 0.0 };
+        let g_sup = g(lo).max(g(hi)).max(interior);
+        let exponent_rounding = (f64::from(p as f32) - p).abs();
+        let b = p * hi.powf(p - 1.0) * self.b + g_sup * exponent_rounding + 2.0 * ulp32(r) + FLOOR;
+        assert!(b.is_finite(), "powf({self:?}, {p}): a non-finite bound — the reference cannot bound this row");
+        Tracked { v: r, b }
     }
 
     /// `lerp(self, y, s) = self + s·(y − self)` (the HLSL definition), rounded per operation.
@@ -192,12 +256,13 @@ pub fn reinhard_jodie_f64(c: [Tracked; 3]) -> [Tracked; 3] {
     })
 }
 
-/// The tonemapper the word's bits 8..11 select: 1 Neutral, 2 Reinhard-Jodie, everything else ACES
-/// (the resolve's documented fallback).
+/// The tonemapper the word's bits 8..11 select: 1 Neutral, 2 Reinhard-Jodie, 3 AgX (render wave
+/// PXt), everything else ACES (the resolve's documented fallback).
 pub fn tonemap_f64(mode_words: u32, c: [Tracked; 3]) -> [Tracked; 3] {
     match (mode_words >> 8) & 0xF {
         1 => neutral_f64(c),
         2 => reinhard_jodie_f64(c),
+        3 => agx_tracked(c),
         _ => aces_f64(c),
     }
 }
@@ -375,4 +440,61 @@ pub fn rcas_stage_f64(taps: Cross<[f32; 3]>, ratio: f32, con: f32) -> [Tracked; 
     let r = Tracked::exact(ratio);
     let y = taps.map(|t| reversible_f64(t.map(|v| Tracked::exact(v).mul(r))));
     reversible_inverse_f64(rcas_f64(y, Tracked::exact(con)))
+}
+
+// ---- Render wave PXt: AgX in the leaf's operation sequence ------------------------------------------
+//
+// The matrices are `agx_f64`'s (three.js's GLSL columns, read here as rows); the sigmoid's seven
+// coefficients are spelled here, as three.js's `agxDefaultContrastApprox` spells them.
+
+/// The AgX sigmoid's coefficients, highest power first: `15.5x⁶ − 40.14x⁵ + 31.96x⁴ − 6.868x³ +
+/// 0.4298x² + 0.1191x − 0.00232`.
+pub const AGX_POLY: [f64; 7] = [15.5, -40.14, 31.96, -6.868, 0.4298, 0.1191, -0.00232];
+
+/// The exponent of AgX's linearisation, `max(d, 0)^2.2`.
+pub const AGX_LINEARIZE_EXP: f64 = 2.2;
+
+/// The rows of a matrix `agx_f64` spells as its three GLSL columns.
+fn rows_of(cols: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    core::array::from_fn(|r| core::array::from_fn(|c| cols[c][r]))
+}
+
+/// `a · b` for two row-major matrices, each entry summed over `k = 0, 1, 2` left to right in f64 —
+/// the order the leaf's `const` fusion uses, so both round the same f64 entry to f32.
+fn mat3_mul(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    core::array::from_fn(|r| core::array::from_fn(|c| a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c]))
+}
+
+/// AgX in the LEAF's operation sequence (`pxt/cut.md` D-A1, D-A2, D-T1): `ci = (INSET ·
+/// SRGB_TO_REC2020) · c` with the product multiplied out in f64 (each entry a constant rounded once
+/// to f32); `x = saturate((log2(max(ci, 1e-10)) − MIN_EV) · (1 / (MAX_EV − MIN_EV)))`; the sigmoid
+/// by Horner (a multiply, then an add); `d = OUTSET · p`; `lin = max(d, 0)^2.2`;
+/// `saturate(REC2020_TO_SRGB · lin)`.
+///
+/// # Panics
+/// When a value or a bound is not finite: a reference-side red, never a verdict on the leaf.
+pub fn agx_tracked(c: [Tracked; 3]) -> [Tracked; 3] {
+    agx_tracked_with(c, &AGX_POLY)
+}
+
+/// [`agx_tracked`] over the sigmoid coefficients `poly` (the slipped-coefficient fixture's entry).
+pub fn agx_tracked_with(c: [Tracked; 3], poly: &[f64; 7]) -> [Tracked; 3] {
+    use agx_f64::{AGX_INSET, AGX_MAX_EV, AGX_MIN_EV, AGX_OUTSET, REC2020_TO_SRGB, SRGB_TO_REC2020};
+    let fused = mat3_mul(&rows_of(&AGX_INSET), &rows_of(&SRGB_TO_REC2020));
+    let floor = Tracked::konst(1e-10);
+    // The f32 evaluation reads `max(ci, f32(1e-10))`, never below the f32 floor.
+    let floor_f32 = f64::from(1.0e-10_f32);
+    let min_ev = Tracked::konst(AGX_MIN_EV);
+    let inv_range = Tracked::konst(1.0 / (AGX_MAX_EV - AGX_MIN_EV));
+    let p = mat3(&fused, c).map(|ci| {
+        let x = ci.max(floor).log2_above(floor_f32).sub(min_ev).mul(inv_range).saturate();
+        poly[1..].iter().fold(Tracked::konst(poly[0]), |acc, &k| acc.mul(x).add(Tracked::konst(k)))
+    });
+    let lin = mat3(&rows_of(&AGX_OUTSET), p).map(|d| d.max(Tracked::konst(0.0)).powf(AGX_LINEARIZE_EXP));
+    let out = mat3(&rows_of(&REC2020_TO_SRGB), lin).map(Tracked::saturate);
+    assert!(
+        out.iter().all(|t| t.v.is_finite() && t.b.is_finite()),
+        "agx_tracked({c:?}) = {out:?}: a non-finite value or bound — a reference-side red, never a verdict on the leaf"
+    );
+    out
 }

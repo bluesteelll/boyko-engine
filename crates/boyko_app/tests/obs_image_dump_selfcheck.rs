@@ -234,15 +234,15 @@ fn obs_image_dump_lit_equals_host_dump() {
     );
 
     // The `lit` ring slot: the same frame's scene-linear `lit`, displayed through the traced
-    // `post_final` body (ACES, exposure ratio 1 — the OBS scene's defaults), is `display`.
+    // `post_final` body under the default configuration's words, is `display`. The OBS Deferred
+    // scene inserts no `LightingConfig` (`build_obs_app_with`), so the frame's curve is
+    // `Tonemapper::default()` and its exposure ratio 1 — whichever curve the engine ships.
     let files = files_of(&dir, "lit");
     assert_eq!(files.len(), 1, "one lit capture expected, found {files:?}");
     let lit = DumpFile::load(&files[0].1);
     assert_eq!((lit.frame, lit.width, lit.height), (display.frame, display.width, display.height), "lit and display: one frame, one extent");
-    let mut words = [0u32; 8];
-    words[boyko_shaderdsl::post::ubo_word("exposure_ratio")] = 1.0f32.to_bits();
-    words[boyko_shaderdsl::post::ubo_word("extent")] = 1;
-    words[boyko_shaderdsl::post::ubo_word("extent") + 1] = 1;
+    let post = boyko_render::post::ResolvedPost::from_config(&boyko_render::LightingConfig::default());
+    let words = boyko_render::post_final_words(&boyko_app::post_host::post_final_gpu(&post, [1, 1]));
     let params = boyko_shaderdsl::post::eval_params(words);
     let mut off = 0u64;
     let mut worst = (0u8, (0, 0));
@@ -263,7 +263,12 @@ fn obs_image_dump_lit_equals_host_dump() {
             }
         }
     }
-    eprintln!("lit through post_final_eval vs display: worst {} LSB at {:?}, {off} channels above 1 LSB", worst.0, worst.1);
+    let curve = (words[boyko_shaderdsl::post::ubo_word("mode_words")] >> boyko_shaderdsl::post::TONEMAP_MODE_SHIFT)
+        & boyko_shaderdsl::post::TONEMAP_MODE_MASK;
+    eprintln!(
+        "lit through post_final_eval (tonemap word {curve}) vs display: worst {} LSB at {:?}, {off} channels above 1 LSB",
+        worst.0, worst.1
+    );
     assert_eq!(off, 0, "the lit dump is not the frame display shows (worst {} LSB at {:?}) — a wrong ring slot", worst.0, worst.1);
 }
 

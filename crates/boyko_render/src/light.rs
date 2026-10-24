@@ -434,6 +434,7 @@ pub enum ClusterSelectMode {
 //                                     ::vb_sdf_mesh_ao (bit 6) — two INDEPENDENT terms
 //   7        (free)                  —
 //   8..11    tonemap operator        this file: TONEMAP_MODE_SHIFT/_MASK / LightingConfig::tonemapper
+//                                     (no shader decodes it since PX1a; the Neutral default writes 1)
 //   12..19   terminator softening    this file: TERMINATOR_SOFT_SHIFT/_MASK / LightingConfig::terminator_softening
 //   20..31   (free)                  —
 //
@@ -500,21 +501,32 @@ const _: () = assert!(
      tonemap sub-field, with no overlap on either side"
 );
 
-/// The resolve's output-stage tonemap curve — packed into light-header word 7
-/// bits [`TONEMAP_MODE_SHIFT`..+4) by [`LightHeaderGpu::new`]. `#[repr(u32)]` so
-/// `self as u32` is the wire value. `Aces` = 0 ⇒ zero bits ⇒ word 7 byte-identical
-/// on every default scene (the 0%-gate). All curves are linear-in → linear-\[0,1\]-out;
-/// the shared manual OETF (`pow(x, 1/2.2)`) is applied after, unchanged.
+/// The output-stage tonemap curve — `post_final`'s mode word carries it (bits
+/// [`TONEMAP_MODE_SHIFT`..+4), `boyko_render::post::ResolvedPost::tonemapper`); light-header word 7
+/// still packs the same sub-field ([`LightHeaderGpu::new`]), which no shader has read since render
+/// wave PX1a. `#[repr(u32)]` so `self as u32` is the wire value. [`Neutral`](Self::Neutral) is
+/// the default (render wave PXt, ruling 116 on owner decision 4); the others stay selectable. All
+/// curves are linear-in → linear-\[0,1\]-out; the shared manual OETF (`pow(x, 1/2.2)`) is applied
+/// after.
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Tonemapper {
-    /// Stephen Hill ACES-fitted (today's curve). The BYTE-IDENTICAL default.
-    #[default]
+    /// Stephen Hill ACES-fitted — the default until render wave PXt; selectable. `post_final`'s
+    /// fallback for every unknown word.
     Aces = 0,
-    /// Khronos PBR Neutral — LUT-free, hue-preserving, gentle toe (no shadow crush).
+    /// Khronos PBR Neutral — LUT-free, hue-preserving, gentle toe (no shadow crush); a base colour
+    /// in `[0.08, 0.8]` displays as authored. The default since render wave PXt (ruling 116).
+    #[default]
     Neutral = 1,
-    /// Reinhard-Jodie — cheap hybrid luminance/per-channel, hue-preserving.
+    /// Reinhard-Jodie — cheap: per channel, the luminance Reinhard `v / (1 + l)` blended toward the
+    /// per-channel `v / (1 + v)` by that channel's own value. NOT hue-preserving: the per-channel
+    /// term shifts the hue of bright saturated colours.
     ReinhardJodie = 2,
+    /// AgX (render wave PXt) — three.js's formulation of Blender's AgX: a log-encoded sigmoid on a
+    /// Rec.2020 base between an inset and an outset matrix, so a bright saturated colour whitens
+    /// with little hue skew. Mid-grey `0.18` maps to `≈ 0.2145` linear (display code 127, against
+    /// ACES Hill's 92). Selectable; it was the default from render wave PXt's C8 until ruling 116.
+    AgX = 3,
 }
 
 /// Word-7 sub-field for the tonemap mode: bits 8..11 (4 bits, 16 operators).
@@ -750,9 +762,11 @@ pub struct LightingConfig {
     /// DEFAULT `false`. Same single-writer contract as
     /// [`vb_sdf_mesh_shadow_armed`](Self::vb_sdf_mesh_shadow_armed).
     pub vb_sdf_mesh_ao_armed: bool,
-    /// The resolve's output-stage tonemap curve — packed into light-header word 7 bits
-    /// [`TONEMAP_MODE_SHIFT`..+4) by [`Self::tonemap_bits`]. DEFAULT [`Tonemapper::Aces`]
-    /// (word 7 bits 8..11 stay 0 — the byte-identical 0%-gate).
+    /// The output-stage tonemap curve (`post_final`'s mode word, through
+    /// `ResolvedPost::tonemapper`), also packed into light-header word 7 bits
+    /// [`TONEMAP_MODE_SHIFT`..+4) by [`Self::tonemap_bits`]. DEFAULT [`Tonemapper::default()`]
+    /// ([`Tonemapper::Neutral`] since render wave PXt: word 7 bits 8..11 carry 1 on a default scene,
+    /// a sub-field no shader reads since PX1a, so `lit` does not move).
     pub tonemapper: Tonemapper,
     /// Softens the diffuse light terminator — the harsh `max(dot(N,L),0)` boundary that
     /// turns normal-map bump slopes into hard dark islands under grazing light — into a
@@ -785,7 +799,7 @@ impl Default for LightingConfig {
             vb_sdf_mesh_ao: false,
             vb_sdf_mesh_shadow_armed: false,
             vb_sdf_mesh_ao_armed: false,
-            tonemapper: Tonemapper::Aces,
+            tonemapper: Tonemapper::default(),
             terminator_softening: 0.0,
         }
     }
@@ -813,7 +827,8 @@ impl LightingConfig {
             | ((sv0 & VB_SDF_MESH_MODE_MASK) << VB_SDF_MESH_MODE_SHIFT)
     }
 
-    /// Word-7 tonemap sub-field bits (0 for [`Tonemapper::Aces`] ⇒ the 0%-gate).
+    /// Word-7 tonemap sub-field bits (0 for [`Tonemapper::Aces`]; `0x100` for the Neutral default —
+    /// a sub-field no shader decodes since render wave PX1a).
     #[inline]
     pub const fn tonemap_bits(&self) -> u32 {
         (self.tonemapper as u32) << TONEMAP_MODE_SHIFT
@@ -1627,6 +1642,9 @@ mod tests {
 
     #[test]
     fn default_config_is_the_zero_gate_anchor() {
+        // Render wave PXt (ruling 116): the default curve is Khronos PBR Neutral, so word 7's
+        // tonemap sub-field carries its word (a sub-field no shader reads since PX1a;
+        // `post_final`'s mode word carries the curve). The gate bits and the terminator bits stay 0.
         let cfg = LightingConfig::default();
         assert_eq!(cfg.exposure, 1.0);
         // The old resolve constants (deferred_pbr.hlsl SKY_DIFFUSE / SKY_SPEC).
@@ -1639,13 +1657,13 @@ mod tests {
         assert!(!cfg.punctual_shadows);
         // The DDGI gate defaults OFF (the byte-identical 0%-gate).
         assert!(!cfg.ddgi_indirect);
-        // The tonemapper defaults to ACES (today's curve, the byte-identical 0%-gate).
-        assert_eq!(cfg.tonemapper, Tonemapper::Aces);
+        // The tonemapper defaults to Khronos PBR Neutral (render wave PXt, ruling 116).
+        assert_eq!(cfg.tonemapper, Tonemapper::Neutral);
         // Terminator softening defaults OFF (the physically-sharp, byte-identical 0%-gate).
         assert_eq!(cfg.terminator_softening, 0.0);
-        // Word 7 is exactly 0 for a default config (the 0%-gate anchor).
+        // Word 7's gate and terminator bits are 0 for a default config (the 0%-gate anchor).
         assert_eq!(cfg.shadow_gate_word(), 0);
-        assert_eq!(cfg.tonemap_bits(), 0);
+        assert_eq!(cfg.tonemap_bits(), (Tonemapper::Neutral as u32) << TONEMAP_MODE_SHIFT);
         assert_eq!(cfg.terminator_bits(), 0);
     }
 
@@ -1767,9 +1785,13 @@ mod tests {
         );
     }
 
+    /// Render wave PXt (ruling 116): Khronos PBR Neutral is the default curve, and
+    /// `LightingConfig::default()` reads it from `Tonemapper::default()` — one default site (K9's
+    /// revert is one `#[default]`).
     #[test]
-    fn tonemapper_default_is_aces() {
-        assert_eq!(Tonemapper::default(), Tonemapper::Aces);
+    fn tonemapper_default_is_neutral() {
+        assert_eq!(Tonemapper::default(), Tonemapper::Neutral);
+        assert_eq!(LightingConfig::default().tonemapper, Tonemapper::default(), "LightingConfig::default() must read Tonemapper::default()");
     }
 
     #[test]
@@ -1779,21 +1801,27 @@ mod tests {
     }
 
     #[test]
-    fn header_word7_is_zero_for_default_config() {
-        // The byte-identity anchor: a default config's header word 7 (sky_diffuse.w) is
-        // exactly 0.0 bits — no shadow/GI gate, no tonemap mode.
+    fn header_word7_of_a_default_config_carries_only_the_default_curve() {
+        // The byte-identity anchor: a default config's header word 7 (sky_diffuse.w) carries no
+        // shadow/GI gate and no terminator softening; since render wave PXt its tonemap sub-field
+        // carries the default curve's word (Neutral = 1, ruling 116), which no shader decodes
+        // (`post_final` reads the curve from its own mode word).
         let h = LightHeaderGpu::new(1, 0, &LightingConfig::default(), 1.0);
-        assert_eq!(h.sky_diffuse[3].to_bits(), 0);
+        assert_eq!(h.sky_diffuse[3].to_bits(), (Tonemapper::default() as u32) << TONEMAP_MODE_SHIFT);
+        assert_eq!(h.sky_diffuse[3].to_bits(), 0x100, "Neutral's word in bits 8..11");
     }
 
     #[test]
     fn tonemap_mode_bits_are_independent_of_the_shadow_gate_bits() {
-        let cfg = LightingConfig { tonemapper: Tonemapper::Neutral, ..LightingConfig::default() };
+        // A curve other than the default's (render wave PXt, ruling 116: the default is Khronos PBR
+        // Neutral), so a packer that kept the default's word instead of the config's is red.
+        let cfg = LightingConfig { tonemapper: Tonemapper::AgX, ..LightingConfig::default() };
+        assert_ne!(cfg.tonemapper, Tonemapper::default(), "PREMISE: the config names a curve other than the default's");
         let h = LightHeaderGpu::new(1, 0, &cfg, 1.0);
         let word7 = h.sky_diffuse[3].to_bits();
         assert_eq!(
             (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
-            Tonemapper::Neutral as u32
+            Tonemapper::AgX as u32
         );
         // Bits 0..4 (shadow/contact/CSM/punctual/DDGI gates) must stay untouched.
         assert_eq!(word7 & 0x1F, 0, "tonemap mode must not touch the shadow/GI gate bits 0..4");
@@ -1830,10 +1858,10 @@ mod tests {
         assert_eq!((word7 >> TERMINATOR_SOFT_SHIFT) & TERMINATOR_SOFT_MASK, expected);
         // Shadow/GI gate bits 0..4 must stay untouched.
         assert_eq!(word7 & 0x1F, 0, "terminator softening must not touch the shadow/GI gate bits 0..4");
-        // The tonemap sub-field 8..11 must stay untouched (Aces default -> 0).
+        // The tonemap sub-field 8..11 must stay untouched (the default curve's word).
         assert_eq!(
             (word7 >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK,
-            0,
+            Tonemapper::default() as u32,
             "terminator softening must not touch the tonemap sub-field 8..11"
         );
     }

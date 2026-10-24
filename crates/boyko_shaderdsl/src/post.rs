@@ -87,12 +87,17 @@ pub const OETF_GAMMA_EXP: f32 = 0.454_545_47;
 pub const TONEMAP_MODE_SHIFT: u32 = 8;
 /// The tonemapper field's mask (4 bits, 16 operators).
 pub const TONEMAP_MODE_MASK: u32 = 0xF;
-/// Tonemapper word: Stephen Hill's ACES fit (the default; any unknown word falls back to it).
+/// Tonemapper word: Stephen Hill's ACES fit (the fallback of every unknown word; the engine
+/// default is [`TONEMAP_NEUTRAL`] since render wave PXt).
 pub const TONEMAP_ACES: u32 = 0;
-/// Tonemapper word: Khronos PBR Neutral.
+/// Tonemapper word: Khronos PBR Neutral — the engine default
+/// (`boyko_render::light::Tonemapper::default()`, render wave PXt, ruling 116).
 pub const TONEMAP_NEUTRAL: u32 = 1;
 /// Tonemapper word: Reinhard-Jodie.
 pub const TONEMAP_REINHARD_JODIE: u32 = 2;
+/// Tonemapper word: AgX (render wave PXt) — three.js's AgX on Blender's Rec.2020 base ([`agx`]);
+/// selectable.
+pub const TONEMAP_AGX: u32 = 3;
 
 /// Mode-word bit 1 (render wave PX1b, H5): the RCAS sharpen stage runs this frame. Bit 0 stays
 /// reserved (H2 rev 2 removed the sanitize bit); bits `TONEMAP_MODE_SHIFT..+4` are the tonemapper.
@@ -147,6 +152,95 @@ const NEUTRAL_F90: f32 = 0.04;
 
 /// Reinhard-Jodie's Rec.709 luma weights.
 const REC709_LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+
+// ---- Render wave PXt: AgX's constants (`tone_curve.md` §5.1; `THIRD-PARTY-NOTICES.md`) -----------
+//
+// three.js's `AgXToneMapping` (MIT), Filament's AgX (Apache-2.0) on Blender's Rec.2020 base. three.js
+// writes its matrices as GLSL columns; they are the ROWS of `mul(M, v)` here. The long matrices are
+// spelled in f64 as the source spells them and rounded to f32 once, in `const` context.
+
+/// `LINEAR_SRGB_TO_LINEAR_REC2020` (BT.2407, three.js), rows.
+const REC709_TO_REC2020_F64: [[f64; 3]; 3] = [[0.6274, 0.3293, 0.0433], [0.0691, 0.9195, 0.0113], [0.0164, 0.0880, 0.8956]];
+/// `AgXInsetMatrix`, rows.
+const AGX_INSET_F64: [[f64; 3]; 3] = [
+    [0.856_627_153_315_983, 0.095_121_240_538_158_8, 0.048_251_606_145_858_3],
+    [0.137_318_972_929_847, 0.761_241_990_602_591, 0.101_439_036_467_562],
+    [0.111_898_212_999_95, 0.076_799_418_603_190_3, 0.811_302_368_396_859],
+];
+/// `AgXOutsetMatrix`, rows.
+const AGX_OUTSET_F64: [[f64; 3]; 3] = [
+    [1.127_100_581_814_436_8, -0.110_606_643_096_603_23, -0.016_493_938_717_834_573],
+    [-0.141_329_763_498_438_3, 1.157_823_702_216_272, -0.016_493_938_717_834_257],
+    [-0.141_329_763_498_438_26, -0.110_606_643_096_602_94, 1.251_936_406_595_040_5],
+];
+/// `AgxMinEv = log2(2⁻¹⁰·0.18)`, as three.js spells it.
+const AGX_MIN_EV_F64: f64 = -12.473_93;
+/// `AgxMaxEv = log2(2^6.5·0.18)`, as three.js spells it.
+const AGX_MAX_EV_F64: f64 = 4.026_069;
+
+/// `a · b` for two row-major matrices, each entry summed over `k = 0, 1, 2` left to right in f64,
+/// then rounded ONCE to f32.
+const fn mat3_mul_f32(a: &[[f64; 3]; 3], b: &[[f64; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0f32; 3]; 3];
+    let mut r = 0;
+    while r < 3 {
+        let mut c = 0;
+        while c < 3 {
+            out[r][c] = (a[r][0] * b[0][c] + a[r][1] * b[1][c] + a[r][2] * b[2][c]) as f32;
+            c += 1;
+        }
+        r += 1;
+    }
+    out
+}
+
+/// A row-major matrix rounded entry by entry to f32.
+const fn mat3_f32(m: &[[f64; 3]; 3]) -> [[f32; 3]; 3] {
+    let mut out = [[0.0f32; 3]; 3];
+    let mut r = 0;
+    while r < 3 {
+        let mut c = 0;
+        while c < 3 {
+            out[r][c] = m[r][c] as f32;
+            c += 1;
+        }
+        r += 1;
+    }
+    out
+}
+
+/// AgX's input matrix, row-major: `AgXInsetMatrix · Rec.709→2020`, multiplied in f64 and rounded once
+/// (`pxt/cut.md` D-A1). Every entry is positive, so a sanitized input keeps `ci ≥ 0`.
+pub const AGX_IN: [[f32; 3]; 3] = mat3_mul_f32(&AGX_INSET_F64, &REC709_TO_REC2020_F64);
+/// AgX's output matrix, row-major: `AgXOutsetMatrix`.
+pub const AGX_OUT: [[f32; 3]; 3] = mat3_f32(&AGX_OUTSET_F64);
+/// `LINEAR_REC2020_TO_LINEAR_SRGB` (three.js), row-major.
+pub const REC2020_TO_REC709: [[f32; 3]; 3] =
+    [[1.6605, -0.5876, -0.0728], [-0.1246, 1.1329, -0.0083], [-0.0182, -0.1006, 1.1187]];
+/// AgX's `log2` floor: `log2(max(ci, AGX_LOG_FLOOR))` (three.js's `max(color, 1e-10)`).
+pub const AGX_LOG_FLOOR: f32 = 1.0e-10;
+/// `AgxMinEv` in f32.
+pub const AGX_MIN_EV: f32 = AGX_MIN_EV_F64 as f32;
+/// `1 / (AgxMaxEv − AgxMinEv)`, computed in f64 and rounded once: the log encoding MULTIPLIES by it
+/// (an `OpFMul` is correctly rounded on every Vulkan device and on the host; `OpFDiv` is 2.5 ULP).
+pub const AGX_EV_INV_RANGE: f32 = (1.0 / (AGX_MAX_EV_F64 - AGX_MIN_EV_F64)) as f32;
+/// The sigmoid `agxDefaultContrastApprox`, highest power first: `15.5x⁶ − 40.14x⁵ + 31.96x⁴ −
+/// 6.868x³ + 0.4298x² + 0.1191x − 0.00232`.
+pub const AGX_POLY: [f32; 7] = [15.5, -40.14, 31.96, -6.868, 0.4298, 0.1191, -0.00232];
+/// The linearisation's exponent, `max(d, 0)^2.2`.
+pub const AGX_LINEARIZE_EXP: f32 = 2.2;
+
+const _: () = {
+    let mut r = 0;
+    while r < 3 {
+        let mut c = 0;
+        while c < 3 {
+            assert!(AGX_IN[r][c] > 0.0, "every AGX_IN entry is positive, so ci >= 0 for a sanitized input");
+            c += 1;
+        }
+        r += 1;
+    }
+};
 
 /// The sRGB EOTF's knee and its two branches' constants.
 const SRGB_EOTF_KNEE: f32 = 0.04045;
@@ -728,6 +822,35 @@ pub fn reinhard_jodie<C: Cf>(c: C::Vec3f) -> C::Vec3f {
     }))
 }
 
+/// AgX (render wave PXt, `pxt/cut.md` D-A1, D-A2): three.js's `AgXToneMapping`
+/// (`src/renderers/shaders/ShaderChunk/tonemapping_pars_fragment.glsl.js`), itself Filament's AgX
+/// (google/filament PR 7236) on Blender's Rec.2020 base — credited in `THIRD-PARTY-NOTICES.md`.
+/// Linear Rec.709 in, linear Rec.709 in `[0, 1]` out, per channel:
+///
+/// - `ci = AGX_IN · c` (the inset and Rec.709 → 2020 as one matrix);
+/// - `x = clamp01((log2(max(ci, AGX_LOG_FLOOR)) − AGX_MIN_EV) · AGX_EV_INV_RANGE)` — three.js's
+///   order, normalise then clamp;
+/// - `p = AGX_POLY(x)` by Horner, each step a multiply then an add (`Cf` has no fused facet; a
+///   driver that contracts a pair moves the result by less than one f32 rounding per step);
+/// - `d = AGX_OUT · p`, `lin = max(d, 0)^AGX_LINEARIZE_EXP` (the intrinsic `pow`), and
+///   `clamp01(REC2020_TO_REC709 · lin)`.
+///
+/// `x`, `p` and `lin` are materialised: each is read several times.
+#[inline]
+pub fn agx<C: Cf>(c: C::Vec3f) -> C::Vec3f {
+    let lit = C::Scalar::lit;
+    let floor = C::named_lit("AGX_LOG_FLOOR", AGX_LOG_FLOOR);
+    let min_ev = C::named_lit("AGX_MIN_EV", AGX_MIN_EV);
+    let inv_range = C::named_lit("AGX_EV_INV_RANGE", AGX_EV_INV_RANGE);
+    let p = mat3_rows::<C>(&AGX_IN, channels::<C>(c)).map(|ci| {
+        let x = C::temp(C::log2(ci.max(floor)).sub(min_ev).mul(inv_range).clamp01());
+        C::temp(AGX_POLY[1..].iter().fold(lit(AGX_POLY[0]), |acc, &k| acc.mul(x).add(lit(k))))
+    });
+    let exp = C::named_lit("AGX_LINEARIZE_EXP", AGX_LINEARIZE_EXP);
+    let lin = mat3_rows::<C>(&AGX_OUT, p).map(|d| C::temp(C::pow(d.max(lit(0.0)), exp)));
+    from_channels::<C>(mat3_rows::<C>(&REC2020_TO_REC709, lin).map(FieldScalar::clamp01))
+}
+
 /// The tonemapper word: `(mode_words >> TONEMAP_MODE_SHIFT) & TONEMAP_MODE_MASK`, materialised once.
 #[inline]
 pub fn tonemapper<C: Cf>(mode_words: C::Uint) -> C::Uint {
@@ -740,30 +863,42 @@ pub fn tonemapper<C: Cf>(mode_words: C::Uint) -> C::Uint {
     )
 }
 
-/// The tonemap curve `mode` selects — Neutral (1), Reinhard-Jodie (2), else ACES (0 and every
-/// unknown word, the resolve's fallback). A REAL branch (`[branch]`): the word is wave-uniform, so
-/// only the selected curve runs. Declares the body-level `post_tonemapped`, so it is called once.
+/// The tonemap curve `mode` selects — AgX (3), Neutral (1), Reinhard-Jodie (2), else ACES (0 and
+/// every unknown word, the resolve's fallback). A REAL branch (`[branch]`): the word is
+/// wave-uniform, so only the selected curve runs — AgX's three `log2` and three `pow` are issued
+/// only under word 3. AgX is tested first (render wave PXt, `pxt/cut.md` D-A4), so its path takes
+/// one scalar compare. Declares the body-level `post_tonemapped`, so it is called once.
 #[inline]
 pub fn tonemap_select<C: Cf>(c: C::Vec3f, mode: C::Uint) -> C::Vec3f {
     let out = C::decl_var_vec3("post_tonemapped", c);
-    let neutral = C::ueq(mode, C::named_uint_val("TONEMAP_NEUTRAL", TONEMAP_NEUTRAL));
+    let agx_word = C::ueq(mode, C::named_uint_val("TONEMAP_AGX", TONEMAP_AGX));
     let _ = C::if_else_branch(
-        neutral,
+        agx_word,
         || {
-            C::set_var_vec3(&out, khronos_pbr_neutral::<C>(c));
+            C::set_var_vec3(&out, agx::<C>(c));
             Flow::Continue(())
         },
         || {
-            let jodie = C::ueq(mode, C::named_uint_val("TONEMAP_REINHARD_JODIE", TONEMAP_REINHARD_JODIE));
+            let neutral = C::ueq(mode, C::named_uint_val("TONEMAP_NEUTRAL", TONEMAP_NEUTRAL));
             C::if_else_branch(
-                jodie,
+                neutral,
                 || {
-                    C::set_var_vec3(&out, reinhard_jodie::<C>(c));
+                    C::set_var_vec3(&out, khronos_pbr_neutral::<C>(c));
                     Flow::Continue(())
                 },
                 || {
-                    C::set_var_vec3(&out, aces_hill::<C>(c));
-                    Flow::Continue(())
+                    let jodie = C::ueq(mode, C::named_uint_val("TONEMAP_REINHARD_JODIE", TONEMAP_REINHARD_JODIE));
+                    C::if_else_branch(
+                        jodie,
+                        || {
+                            C::set_var_vec3(&out, reinhard_jodie::<C>(c));
+                            Flow::Continue(())
+                        },
+                        || {
+                            C::set_var_vec3(&out, aces_hill::<C>(c));
+                            Flow::Continue(())
+                        },
+                    )
                 },
             )
         },

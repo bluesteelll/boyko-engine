@@ -195,7 +195,8 @@ fn display_picked(w: [u32; 8], scene: &[[f32; 4]], pick: impl Fn(usize, f64) -> 
 
 /// The integer nearest `v` that round-to-nearest does NOT pick — the other code Vulkan's float →
 /// UNORM conversion may return (it returns ONE OF the two integers nearest `v`;
-/// `hdr_branch_fixtures.rs`'s `constant8`, triage r1 F3) — and `v` itself when `v` is integral.
+/// `boyko_app/tests/common/hdr_fixtures.rs`'s `DISPLAY_LSB`, triage r1 F3) — and `v` itself when
+/// `v` is integral.
 fn far_neighbour(v: f64) -> f64 {
     if v.round() == v.floor() { v.ceil() } else { v.floor() }
 }

@@ -13,18 +13,26 @@
 //! and 10⁴ seeded crosses; the body's NaN guard against the LITERAL FSR 1 on all-black ring channels;
 //! FSR 2's reversible pair round trip; and RCAS's identity on a flat cross — each under the same
 //! running bound plus `2⁻¹²⁶`, not a fixed ULP count.
+//!
+//! Render wave PXt (`pxt/cut.md` D-T1…D-T3b): the AgX leaf against PX0's `f64` transcription of
+//! three.js's `AgXToneMapping` (`post_f64::agx_f64`, DS-H6) under the running bound of a `Tracked`
+//! twin of the leaf's own operation sequence (`post_f64::agx_tracked`, held to `agx_f64` within
+//! `1e-12`) — not "≤ 4 ULP", which is red on a correct Horner sigmoid (verify r5 Q1); the grey axis
+//! monotone and in `[0, 1]`; zero and denormal inputs finite; and `tone_curve.md` §4's anchors.
 
 mod post_f64;
 
 use boyko_shaderdsl::cf::EvalCf;
 use boyko_shaderdsl::post::{
-    aces_hill, eval_params, hdr_sanitize, khronos_pbr_neutral, oetf_gamma22, pre_ratio_apply,
+    aces_hill, agx, eval_params, hdr_sanitize, khronos_pbr_neutral, oetf_gamma22, pre_ratio_apply,
     rcas_lobe, rcas_resolve, reinhard_jodie, srgb_eotf, tonemap_reversible, tonemap_reversible_inverse,
     tonemap_select,
 };
+use post_f64::agx_f64::{AgxLook, agx_f64};
 use post_f64::{
-    Cross, FLOOR, Tracked, aces_f64, neutral_f64, rcas_f64, rcas_fsr1_literal, rcas_lobe_f64,
-    reinhard_jodie_f64, reversible_f64, reversible_inverse_f64, srgb_oetf_f64, ulp32,
+    AGX_POLY, Cross, FLOOR, Tracked, aces_f64, agx_tracked, agx_tracked_with, neutral_f64, rcas_f64,
+    rcas_fsr1_literal, rcas_lobe_f64, reinhard_jodie_f64, reversible_f64, reversible_inverse_f64,
+    srgb_oetf_f64, ulp32,
 };
 
 /// The bound's safety factor (the image oracle's `k`).
@@ -115,10 +123,11 @@ fn reinhard_jodie_matches_f64() {
 fn tonemap_select_equals_each_curve() {
     // Word -> the curve it must dispatch to, bit for bit (the dispatch adds no arithmetic). Word 7
     // is unknown and falls back to ACES; the high-bit noise checks the field extraction.
-    let cases: [(u32, Leaf, &str); 4] = [
+    let cases: [(u32, Leaf, &str); 5] = [
         (0, aces_hill::<EvalCf>, "aces_hill"),
         (1, khronos_pbr_neutral::<EvalCf>, "khronos_pbr_neutral"),
         (2, reinhard_jodie::<EvalCf>, "reinhard_jodie"),
+        (3, agx::<EvalCf>, "agx"),
         (7, aces_hill::<EvalCf>, "aces_hill (unknown word 7)"),
     ];
     for (word, curve, name) in cases {
@@ -386,4 +395,189 @@ fn eval_params_reads_the_ubo_words() {
     assert_eq!(p.exposure_ratio.to_bits(), 0.5f32.to_bits(), "exposure_ratio is word 1");
     assert_eq!(p.extent, [1920, 1080], "extent is words 2..4");
     assert_eq!(p.sharpness.to_bits(), 0.375f32.to_bits(), "sharpness is word 4");
+}
+
+// ---- Render wave PXt: AgX ---------------------------------------------------------------------------
+
+/// The colours of `tone_curve.md` §4: mid-grey, a pure red light ×10, and the fire colour
+/// (1, 0.35, 0.08) ×1 and ×10.
+const SECTION_4_COLOURS: [[f32; 3]; 4] = [[0.18; 3], [10.0, 0.0, 0.0], [1.0, 0.35, 0.08], [10.0, 3.5, 0.8]];
+
+/// AgX's inputs (`pxt/cut.md` D-T1): the curve-leaf domain, 10⁵ colours with each channel
+/// log-uniform over `[2⁻²⁰, 2⁸]`, and §4's colours.
+fn agx_inputs() -> Vec<[f32; 3]> {
+    let mut v = curve_inputs();
+    let mut rng = Rng(0xA6_0001);
+    v.extend((0..100_000).map(|_| core::array::from_fn::<f32, 3, _>(|_| rng.log2_range(-20.0, 8.0))));
+    v.extend(SECTION_4_COLOURS);
+    v
+}
+
+/// The one-reference check: `Err` naming the first input where `twin`'s value leaves PX0's
+/// `agx_f64` (the decided formula) by more than `1e-12`. A slip in the twin fails here instead of
+/// loosening the leaf comparison it bounds.
+fn twin_is_the_reference(inputs: &[[f32; 3]], twin: impl Fn([Tracked; 3]) -> [Tracked; 3]) -> Result<(), String> {
+    for c in inputs {
+        let t = twin(c.map(Tracked::exact));
+        let r = agx_f64(c.map(f64::from), AgxLook::Base);
+        for ch in 0..3 {
+            let d = (t[ch].v - r[ch]).abs();
+            let within = d <= 1e-12;
+            if !within {
+                return Err(format!("the AgX twin at {c:?}[{ch}] = {:e}, agx_f64 {:e}: |diff| {d:e} > 1e-12", t[ch].v, r[ch]));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// **Host test 1** (`pxt/cut.md` D-T1): `|agx(c) − agx_f64(c)| ≤ K·b + 2⁻¹²⁶` per channel, `b` the
+/// twin's running bound, on every input of [`agx_inputs`]; the run prints the worst `|err| / tol`
+/// and the worst `|err|` in f32 ULPs of the reference over outputs `≥ 2⁻¹⁰` (verify r5 Q1).
+#[test]
+fn agx_matches_f64_three_js_under_the_running_bound() {
+    let inputs = agx_inputs();
+    if let Err(why) = twin_is_the_reference(&inputs, agx_tracked) {
+        panic!("{why}");
+    }
+    let mut worst = 0.0f64;
+    let mut worst_ulp = 0.0f64;
+    let mut bad: Vec<String> = Vec::new();
+    for c in &inputs {
+        let bound = agx_tracked(c.map(Tracked::exact));
+        let want = agx_f64(c.map(f64::from), AgxLook::Base);
+        let got = agx::<EvalCf>(*c);
+        for ch in 0..3 {
+            let err = (f64::from(got[ch]) - want[ch]).abs();
+            let tol = K * bound[ch].b + FLOOR;
+            worst = worst.max(err / tol);
+            if want[ch] >= 1.0 / 1024.0 {
+                worst_ulp = worst_ulp.max(err / ulp32(want[ch]));
+            }
+            let within = err <= tol;
+            if !within && bad.len() < 6 {
+                bad.push(format!("agx({c:?})[{ch}] = {:e}, agx_f64 {:e}, |err| {err:e} > tol {tol:e}", got[ch], want[ch]));
+            }
+        }
+    }
+    eprintln!("agx: worst |err|/tol = {worst:.4}; worst |err| = {worst_ulp:.2} f32 ULP of the reference (outputs >= 2^-10)");
+    assert!(bad.is_empty(), "agx disagrees with PX0's f64 transcription of three.js:\n{}", bad.join("\n"));
+}
+
+/// The one-reference check can fail: a twin with `40.41` in place of the sigmoid's `40.14` (a
+/// transposed digit) leaves `agx_f64` by more than `1e-12`, every run.
+#[test]
+fn the_agx_reference_check_rejects_a_slipped_coefficient() {
+    let mut slipped = AGX_POLY;
+    slipped[1] = -40.41;
+    assert!(
+        twin_is_the_reference(&agx_inputs(), |c| agx_tracked_with(c, &slipped)).is_err(),
+        "a twin with a slipped sigmoid coefficient passed the 1e-12 check: the check cannot fail"
+    );
+}
+
+/// **Host test 2** (`pxt/cut.md` D-T2): on 10⁴ log-spaced greys over `[2⁻¹⁴, 2⁸]` every output
+/// channel lies in `[0, 1]` and never falls by more than the two neighbours' bounds,
+/// `y_{i+1} ≥ y_i − K·(b_i + b_{i+1})`.
+#[test]
+fn agx_grey_axis_is_monotone_and_bounded() {
+    const N: usize = 10_000;
+    let mut prev: Option<([f32; 3], [Tracked; 3])> = None;
+    for i in 0..N {
+        let g = (-14.0 + 22.0 * i as f64 / (N - 1) as f64).exp2() as f32;
+        let bound = agx_tracked([Tracked::exact(g); 3]);
+        let y = agx::<EvalCf>([g; 3]);
+        for ch in 0..3 {
+            assert!((0.0..=1.0).contains(&y[ch]), "agx(grey {g:e})[{ch}] = {} lies outside [0, 1]", y[ch]);
+            if let Some((py, pb)) = prev {
+                let floor = f64::from(py[ch]) - K * (pb[ch].b + bound[ch].b);
+                assert!(f64::from(y[ch]) >= floor, "agx is not monotone on the grey axis at {g:e}[{ch}]: {} after {}", y[ch], py[ch]);
+            }
+        }
+        prev = Some((y, bound));
+    }
+}
+
+/// **Host test 3** (`pxt/cut.md` D-T3): zero, the smallest denormal, a denormal, the smallest normal
+/// and two mixed colours give finite outputs that equal `agx_f64` within the running bound.
+///
+/// This is NOT a gate on the `log2` floor (`pxt/critique.md` W2): `clamp01` sends `log2(0) = −∞` to
+/// the same `x = 0` as the floor's `log2(1e-10) ≈ −33.2`, so the floor is unobservable in any value.
+/// Its presence is held by the SPIR-V census in `post_edsl_sync.rs` (every `Log2` reads a `max`
+/// against `1e-10`).
+#[test]
+fn agx_keeps_zero_and_denormal_inputs_finite() {
+    let tiny = [0.0f32, f32::from_bits(1), 1.0e-40, f32::MIN_POSITIVE];
+    let mut inputs: Vec<[f32; 3]> = tiny.iter().map(|&t| [t; 3]).collect();
+    inputs.extend([[0.0, 0.0, 1.0e-30], [64512.0, 0.0, 0.0]]);
+    for c in inputs {
+        let bound = agx_tracked(c.map(Tracked::exact));
+        let want = agx_f64(c.map(f64::from), AgxLook::Base);
+        let got = agx::<EvalCf>(c);
+        for ch in 0..3 {
+            assert!(got[ch].is_finite(), "agx({c:?})[{ch}] = {} is not finite", got[ch]);
+            let err = (f64::from(got[ch]) - want[ch]).abs();
+            let tol = K * bound[ch].b + FLOOR;
+            assert!(err <= tol, "agx({c:?})[{ch}] = {:e}, agx_f64 {:e}: |err| {err:e} > tol {tol:e}", got[ch], want[ch]);
+        }
+    }
+}
+
+/// The HSV hue, in degrees, of a linear colour (`tone_curve.md` §4: "Hue is the HSV hue of the
+/// linear output").
+fn hsv_hue(c: [f64; 3]) -> f64 {
+    let (max, min) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+    let d = max - min;
+    assert!(d > 0.0, "an achromatic colour {c:?} has no hue");
+    let h = if max == c[0] {
+        ((c[1] - c[2]) / d).rem_euclid(6.0)
+    } else if max == c[1] {
+        (c[2] - c[0]) / d + 2.0
+    } else {
+        (c[0] - c[1]) / d + 4.0
+    };
+    60.0 * h
+}
+
+/// One `tone_curve.md` §4 anchor.
+enum Anchor {
+    /// Every linear output channel within `tol` of the value.
+    Linear(f64, f64),
+    /// The HSV hue of the linear output within `tol` degrees of the value.
+    Hue(f64, f64),
+}
+
+/// `Err` naming the miss when `out` does not meet `anchor`.
+fn meets(anchor: &Anchor, out: [f64; 3]) -> Result<(), String> {
+    match *anchor {
+        Anchor::Linear(want, tol) if out.iter().all(|v| (v - want).abs() <= tol) => Ok(()),
+        Anchor::Linear(want, tol) => Err(format!("linear {out:?}, want {want} ± {tol}")),
+        Anchor::Hue(want, tol) => {
+            let h = hsv_hue(out);
+            if (h - want).abs() <= tol { Ok(()) } else { Err(format!("hue {h:.2}° of {out:?}, want {want}° ± {tol}°")) }
+        }
+    }
+}
+
+/// **The §4 anchors** (`pxt/cut.md` D-T3b): mid-grey `0.18 → 0.2145 ± 1e-3` (linear, every
+/// channel), fire ×10 → HSV hue `31.1° ± 0.5°`, red ×10 → `13.6° ± 0.5°` (`tone_curve.md` §4.1,
+/// §4.3). Asserted on PX0's `agx_f64` FIRST — a red there means the hand-computed [E] figure is
+/// wrong, not the leaf — then on the leaf.
+#[test]
+fn agx_anchors_match_tone_curve_section_4() {
+    let anchors: [(&str, [f32; 3], Anchor); 3] = [
+        ("mid-grey 0.18", [0.18; 3], Anchor::Linear(0.2145, 1e-3)),
+        ("fire (1, 0.35, 0.08) x10", [10.0, 3.5, 0.8], Anchor::Hue(31.1, 0.5)),
+        ("red x10", [10.0, 0.0, 0.0], Anchor::Hue(13.6, 0.5)),
+    ];
+    for (name, c, anchor) in &anchors {
+        if let Err(why) = meets(anchor, agx_f64(c.map(f64::from), AgxLook::Base)) {
+            panic!("REFERENCE-side anchor red, {name}: agx_f64 gives {why} — the tone_curve.md figure is wrong, not the leaf");
+        }
+    }
+    for (name, c, anchor) in &anchors {
+        if let Err(why) = meets(anchor, agx::<EvalCf>(*c).map(f64::from)) {
+            panic!("the AgX leaf misses the tone_curve.md section 4 anchor, {name}: {why}");
+        }
+    }
 }

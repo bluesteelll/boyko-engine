@@ -64,7 +64,7 @@ use boyko_render::light::LightingConfig;
 use boyko_render::post::ResolvedPost;
 use boyko_shaderdsl::cf::HostTex2;
 use boyko_shaderdsl::pixfmt::{Channel, steps_between};
-use boyko_shaderdsl::post::{OETF_GAMMA_EXP, eval_params, post_final_eval};
+use boyko_shaderdsl::post::{OETF_GAMMA_EXP, TONEMAP_ACES, TONEMAP_MODE_SHIFT, eval_params, post_final_eval, ubo_word};
 use boyko_shaderdsl::prims_probe::vk_pow_bound;
 use graph_receipt::{fresh_out, run_worker};
 use hdr_fixtures::{ENV_AA, ENV_FIXTURE, ENV_TEST_FORCE, Expect, HOT_R, Hot, capture_scene, fixture, fixture_worker_main};
@@ -167,7 +167,8 @@ fn eval_bound_lsb(o: f32) -> f64 {
     1.0 + oetf
 }
 
-/// The `post_final` words the runner uploads for the default config at `extent` (Aces, ratio 1).
+/// The `post_final` words the runner uploads for the default config at `extent` (the default
+/// curve — Khronos PBR Neutral since render wave PXt —, ratio 1).
 fn runner_post_words(extent: [u32; 2]) -> [u32; 8] {
     let post = ResolvedPost::from_config(&LightingConfig::default());
     boyko_render::post_final_words(&boyko_app::post_host::post_final_gpu(&post, extent))
@@ -175,20 +176,21 @@ fn runner_post_words(extent: [u32; 2]) -> [u32; 8] {
 
 /// Test 11's display half, over the scene image (`w × h` RGBA texels) and `display` (RGB codes):
 /// `display` at the core is ≥ 254 in every channel; and over the shoulder samples (module doc)
-/// `display` is `post_final_eval` of the scene texel within [`eval_bound_lsb`], with at least
-/// [`SHOULDER_MIN`] samples, [`SHOULDER_SIDE_MIN`] of them on each side of `lit` = 1.0. `Ok(samples)`
-/// or the failure, named.
+/// `display` is `post_final_eval` of the scene texel under `words` within [`eval_bound_lsb`],
+/// with at least [`SHOULDER_MIN`] samples, [`SHOULDER_SIDE_MIN`] of them on each side of `lit` =
+/// 1.0. `Ok(samples)` or the failure, named.
 fn check_display_shoulder(
     scene: &[[f32; 4]],
     display: &[[u8; 3]],
     (w, h): (u32, u32),
     core: (u32, u32),
+    words: [u32; 8],
 ) -> Result<usize, String> {
     let c = display[(core.1 * w + core.0) as usize];
     if c.iter().any(|&v| v < 254) {
         return Err(format!("display at the sun core {core:?} is {c:?}, not >= 254/255"));
     }
-    let params = eval_params(runner_post_words([w, h]));
+    let params = eval_params(words);
     let tex = HostTex2::new(scene, w, h);
     let clip_code = |x: f32| 255.0 * f64::from(x.clamp(0.0, 1.0)).powf(f64::from(OETF_GAMMA_EXP));
     let (mut samples, mut above, mut below) = (0usize, 0usize, 0usize);
@@ -267,7 +269,7 @@ fn drive_sun(ssaa: bool) {
             [p[0], p[1], p[2]]
         })
         .collect();
-    match check_display_shoulder(&texels(&scene), &px, (d.width, d.height), core) {
+    match check_display_shoulder(&texels(&scene), &px, (d.width, d.height), core, runner_post_words([d.width, d.height])) {
         Ok(n) => println!("{tag}: {n} shoulder samples, display = the tonemap of {scene_name} on every one"),
         Err(e) => panic!("{tag}: {e}"),
     }
@@ -297,7 +299,13 @@ fn the_shoulder_check_reds_a_hard_clip_and_a_dim_core() {
             [v, v * 0.95, v * 0.9, 1.0]
         }))
         .collect();
-    let params = eval_params(runner_post_words([w, h]));
+    // The falloff (its core of 16, `CLIP_GAP`, the sample floors) is calibrated under ACES Hill,
+    // so this host check of the verdict names that curve (render wave PXt, `pxt/cut.md` D-G2's
+    // rule): under AgX a core of 16 does not display >= 254 in blue. The device drivers judge
+    // under the run's default words.
+    let mut words = runner_post_words([w, h]);
+    words[ubo_word("mode_words")] = TONEMAP_ACES << TONEMAP_MODE_SHIFT;
+    let params = eval_params(words);
     let tex = HostTex2::new(&scene, w, h);
     let q = |c: f64| c.round().clamp(0.0, 255.0) as u8;
     let toned: Vec<[u8; 3]> = (0..h)
@@ -307,21 +315,21 @@ fn the_shoulder_check_reds_a_hard_clip_and_a_dim_core() {
             [q(255.0 * f64::from(o[0])), q(255.0 * f64::from(o[1])), q(255.0 * f64::from(o[2]))]
         })
         .collect();
-    let n = check_display_shoulder(&scene, &toned, (w, h), (0, 0)).expect("the tonemapped display shoulders");
+    let n = check_display_shoulder(&scene, &toned, (w, h), (0, 0), words).expect("the tonemapped display shoulders");
     assert!(n >= SHOULDER_MIN, "{n}");
     // A hard clip instead of the tonemap: `OETF(saturate(lit))`.
     let clipped: Vec<[u8; 3]> = scene
         .iter()
         .map(|t| [0, 1, 2].map(|k| q(255.0 * f64::from(t[k].clamp(0.0, 1.0)).powf(f64::from(OETF_GAMMA_EXP)))))
         .collect();
-    assert!(check_display_shoulder(&scene, &clipped, (w, h), (0, 0)).unwrap_err().contains("does not shoulder"));
+    assert!(check_display_shoulder(&scene, &clipped, (w, h), (0, 0), words).unwrap_err().contains("does not shoulder"));
     let mut dim = toned.clone();
     dim[0] = [200; 3];
-    assert!(check_display_shoulder(&scene, &dim, (w, h), (0, 0)).unwrap_err().contains("not >= 254"));
+    assert!(check_display_shoulder(&scene, &dim, (w, h), (0, 0), words).unwrap_err().contains("not >= 254"));
     // A scene that never leaves the clip's plateau has no shoulder to judge.
     let flat = vec![[40.0f32, 40.0, 40.0, 1.0]; (w * h) as usize];
     let white = vec![[255u8; 3]; (w * h) as usize];
-    assert!(check_display_shoulder(&flat, &white, (w, h), (0, 0)).unwrap_err().contains("knee"));
+    assert!(check_display_shoulder(&flat, &white, (w, h), (0, 0), words).unwrap_err().contains("knee"));
 }
 
 // ---- 11b: every producer stores above 1.0 (the switch commit) -----------------------------------

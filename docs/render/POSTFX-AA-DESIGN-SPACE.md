@@ -670,7 +670,7 @@ It becomes a candidate only after PX3 ships and a scene shows the need.
   Otherwise the curve is authored in-house as a parametric sigmoid on the same log2 range, and it
   is named "AgX-like", not AgX. **Decided 2026-10-11 (amended 2026-10-12, AD-5):** the licence is
   accepted — the constants come from three.js (MIT) and Filament (Apache-2.0), attributed in
-  `NOTICE` — and AgX becomes the default curve at rung PXt; the "AgX-like" substitute is dropped.
+  `NOTICE` — and AgX becomes the default curve at rung PXt; the "AgX-like" substitute is dropped. *(Superseded 2026-10-24, ruling 116: the default is Khronos PBR Neutral; AgX ships selectable.)*
 - **Tony McMapface** is dual MIT / Apache-2.0 and ships as a baked 48³ LUT; its generator is
   unpublished (T15). An offline converter in a tool crate (never the runtime) turns it into the
   engine's LUT asset: a small header plus RGBA16F texels, hash-gated like the reflections design's
@@ -679,7 +679,7 @@ It becomes a candidate only after PX3 ships and a scene shows the need.
   evaluated in the bake.
 
 **The default curve** is an owner value (§13 V2). It stays ACES Hill, today's look, until the owner
-chooses.
+chooses. *(Superseded 2026-10-24, ruling 116: the default is Khronos PBR Neutral — the owner's 2026-10-11 choice of AgX at PXt (§13 Q2, AD-5) was superseded in turn; ACES Hill and AgX ship selectable.)*
 
 ### 5.7 Bloom — the 13-tap / tent pyramid; no X-SPD, no FFT
 
@@ -1354,7 +1354,7 @@ PX12. PX13–PX17 and PU follow owner scope or measurement. The order is chosen 
 > **Amended 2026-10-12 by the render-wave plan (AD-3, AD-4, AD-5):** the post eDSL rung **PXe**
 > lands before PX1, so `post_final` is generator-owned from its first commit and **PX2 is
 > deleted**; **PX1 is split** into PX1a (`lit` to HDR, the shipped CAS reading `display`) and PX1b
-> (FSR1 RCAS fused into `post_final`); **PXt** (AgX the default curve) follows PX1b. The wave
+> (FSR1 RCAS fused into `post_final`); **PXt** (AgX the default curve; Khronos PBR Neutral since ruling 116, 2026-10-24) follows PX1b. The wave
 > order is therefore PX0 → PXe → PX1a → PX1b → PXt → PX3 → …, as the plan's queue states.
 
 - **Measurement first**, so every later cost claim is checkable (P17), and so the texel-rate
@@ -1435,7 +1435,7 @@ PX12. PX13–PX17 and PU follow owner scope or measurement. The order is chosen 
 2. **The default tonemap curve.** The choices are ACES Hill (today's look; hue-shifting, T14),
    Khronos Neutral, Reinhard-Jodie, AgX (**subject to a licence you confirm**; otherwise an
    in-house AgX-like curve) or Tony McMapface (T15). Recommended: keep ACES until you have seen
-   them all on the golden scenes after PX5.
+   them all on the golden scenes after PX5. *(Decided: Q2 below; since 2026-10-24, ruling 116, the default is Khronos PBR Neutral.)*
 3. **The shipped look preset for a new camera.** Which of auto-exposure, bloom, vignette and grain
    are on by default, and what `compensation_ev` is? Note that `Auto` on today's scenes lands
    about 2.3 EV darker than exposure 1.0 [E] (§5.4). Dither is decided (D9). Recommended: all off,
@@ -1465,7 +1465,7 @@ PX12. PX13–PX17 and PU follow owner scope or measurement. The order is chosen 
 
 **Decided by the owner, 2026-10-11 (render-wave plan index §9 items 1–4; amended 2026-10-12):**
 - **Q1:** now — `lit` moves to HDR at PX1a (AD-1, AD-4).
-- **Q2:** AgX, the three.js / Filament formulation, licence accepted; the default from PXt (AD-5).
+- **Q2:** AgX, the three.js / Filament formulation, licence accepted; the default from PXt (AD-5). *(Superseded 2026-10-24, ruling 116: the default is Khronos PBR Neutral; AgX ships selectable.)*
 - **Q3:** every post effect OFF on a new camera, `compensation_ev = 0`, the zero gate preserved;
   dither on from PX6; a named `CinematicPost` preset bundle ships at PX6.
 - **Q4:** no vendor ML upscalers in this wave.
