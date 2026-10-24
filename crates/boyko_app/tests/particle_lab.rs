@@ -75,8 +75,8 @@ const CORE_LIT: f32 = 1.0;
 
 /// The display floor of [`CORE_LIT`]: the code `post_final_eval` maps the white `lit` texel
 /// `pre_exposure · CORE_LIT` to under this run's resolved post settings (the words
-/// [`post_final_gpu`] uploads), quantised like the UNORM store, least channel. Under the fixture's
-/// defaults (ACES Hill, exposure 1) it is 205.
+/// [`post_final_gpu`] uploads), quantised like the UNORM store, least channel — the run's curve
+/// (the engine default, AgX since render wave PXt; it was 205 under ACES Hill, exposure 1).
 ///
 /// Measured on the PX1a display (ruling 84's runs, 512^2, frame 30): armed, 354
 /// (`particle_additive`) and 371 (`particle_sdf_collide`) fan pixels clear it, all of them at 210

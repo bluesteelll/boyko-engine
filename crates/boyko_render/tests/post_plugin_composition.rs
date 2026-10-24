@@ -86,7 +86,7 @@ fn the_policy_step_cuts_on_a_camera_change_and_on_a_request_and_carries_the_rati
             pre_exposure: 1.0,
             pre_ratio: 1.0,
             prev_pre_exposure: 1.0,
-            tonemapper: 0,
+            tonemapper: Tonemapper::default() as u32,
             cut: 0,
             active_camera: None
         }

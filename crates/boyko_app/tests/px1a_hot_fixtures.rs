@@ -167,7 +167,8 @@ fn eval_bound_lsb(o: f32) -> f64 {
     1.0 + oetf
 }
 
-/// The `post_final` words the runner uploads for the default config at `extent` (Aces, ratio 1).
+/// The `post_final` words the runner uploads for the default config at `extent` (the default
+/// curve — AgX since render wave PXt —, ratio 1).
 fn runner_post_words(extent: [u32; 2]) -> [u32; 8] {
     let post = ResolvedPost::from_config(&LightingConfig::default());
     boyko_render::post_final_words(&boyko_app::post_host::post_final_gpu(&post, extent))

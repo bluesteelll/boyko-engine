@@ -19,11 +19,16 @@
 //!
 //! The device side is `post_final.comp.hlsl` (the SAME traced body as [`post_final_eval`]) and the
 //! spliced `lit_store_saturate` span (the SAME leaf, `tests/post_chain_spv_sync.rs`).
+//!
+//! **Render wave PXt.** [`LIT_BACKGROUND_SCENE`] is PX1a's inversion through ACES Hill, and stays:
+//! re-inverting it through AgX would move `lit` on every background pixel at the flip
+//! (`pxt/cut.md` D-F4). Under the AgX default the fallback background displays brighter;
+//! `the_fallback_background_under_the_default_curve` prints its codes for the review legend.
 
 use boyko_rhi_vulkan::present::LIT_BACKGROUND_SCENE;
 use boyko_shaderdsl::cf::{EvalCf, HostTex2};
 use boyko_shaderdsl::pixfmt::{Channel, Rounding, quantize};
-use boyko_shaderdsl::post::{HDR_MAX, eval_params, lit_store_saturate, post_final_eval, ubo_word};
+use boyko_shaderdsl::post::{HDR_MAX, TONEMAP_MODE_SHIFT, eval_params, lit_store_saturate, post_final_eval, ubo_word};
 
 /// The 8-bit background the display-referred store wrote before PX1a, on the blessing device.
 const OLD_BACKGROUND_8: [u8; 3] = [13, 13, 25];
@@ -34,7 +39,14 @@ const CENTRE_MARGIN: f32 = 0.05;
 
 /// `post_final`'s output for one scene texel: ACES Hill (mode 0), exposure ratio 1, extent 1×1.
 fn display(rgb: [f32; 3]) -> [f32; 3] {
+    display_under(0, rgb)
+}
+
+/// `post_final`'s output for one scene texel under tonemapper word `curve`, exposure ratio 1,
+/// extent 1×1.
+fn display_under(curve: u32, rgb: [f32; 3]) -> [f32; 3] {
     let mut words = [0u32; 8];
+    words[ubo_word("mode_words")] = curve << TONEMAP_MODE_SHIFT;
     words[ubo_word("exposure_ratio")] = 1.0f32.to_bits();
     words[ubo_word("extent")] = 1;
     words[ubo_word("extent") + 1] = 1;
@@ -77,6 +89,23 @@ fn the_background_constant_displays_the_old_background_at_its_bin_centres() {
         assert_eq!(quantize8(v), old, "channel {k}: post_final displays {codes} codes, not the old background {old}");
         let off = (codes - f32::from(old)).abs();
         assert!(off <= CENTRE_MARGIN, "channel {k}: {codes} codes is {off} from the bin centre {old} (margin {CENTRE_MARGIN})");
+    }
+}
+
+/// Render wave PXt (`pxt/cut.md` D-F4; critique O1) — RECORDED for the review legend: the 8-bit codes
+/// the fallback background displays under the engine's default curve, beside ACES Hill's
+/// ([`OLD_BACKGROUND_8`], computed, not a literal). Once the default is not ACES the two must
+/// differ — the default reached this display path.
+#[test]
+fn the_fallback_background_under_the_default_curve() {
+    let stored = LIT_BACKGROUND_SCENE.map(|c| store16(c, Rounding::TowardZero));
+    let aces = display_under(0, stored).map(quantize8);
+    let curve = boyko_render::Tonemapper::default();
+    let codes = display_under(curve as u32, stored).map(quantize8);
+    println!("fallback background: ACES Hill {aces:?} (the pinned {OLD_BACKGROUND_8:?}), the default {curve:?} {codes:?}");
+    assert_eq!(aces, OLD_BACKGROUND_8, "ACES Hill must still display the pinned background");
+    if curve != boyko_render::Tonemapper::Aces {
+        assert_ne!(codes, aces, "the default {curve:?} displays the background exactly as ACES Hill: the default did not reach the display");
     }
 }
 

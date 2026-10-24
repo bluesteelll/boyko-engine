@@ -12,7 +12,9 @@
 //!   are unchanged); an idle frame bumps neither.
 //! - **(8c)** the composed world: the change is visible in the staged header the SAME frame.
 //! - **The pixel-neutral pin (C8):** for the pinned config the staged header is a literal word
-//!   vector — the bytes the producers read at C7 — so PX1a's ECS commit moves no pixel.
+//!   vector — the bytes the producers read at C7 — so PX1a's ECS commit moves no pixel. Since render
+//!   wave PXt word 7 carries the default curve's tonemap sub-field (AgX, `0x300`), which no shader
+//!   decodes (`post_final`'s mode word carries the curve), so the producers' pixels do not move.
 //!
 //! SINGLE-TEST BINARY (`le_support/common.rs`'s isolation rule): this file's one `#[test]` adds
 //! `LightingPlugin` and then spawns a light.
@@ -45,7 +47,9 @@ fn pinned_header(exposure: f32) -> Vec<u32> {
         d.sky_diffuse[0].to_bits(),
         d.sky_diffuse[1].to_bits(),
         d.sky_diffuse[2].to_bits(),
-        0,
+        // Word 7: no shadow / GI gate and no terminator softening; the default curve's tonemap
+        // sub-field (render wave PXt: AgX, 0x300), dead since PX1a.
+        d.tonemap_bits(),
         d.sky_spec[0].to_bits(),
         d.sky_spec[1].to_bits(),
         d.sky_spec[2].to_bits(),
