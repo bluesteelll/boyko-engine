@@ -27,7 +27,7 @@
 //!   * [`contact_ao_under_a_resting_sphere_survives`] — non-vacuity: real contact occlusion on a
 //!     floor under the sphere stays dark.
 //!
-//! Host-only: no device, no `#[ignore]`.
+//! Host-only: no device, nothing ignored.
 
 use std::cell::Cell;
 

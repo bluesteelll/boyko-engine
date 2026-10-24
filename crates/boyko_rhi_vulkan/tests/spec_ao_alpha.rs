@@ -20,7 +20,7 @@
 //!   * [`the_shared_body_is_the_host_formula`] — the shared body's text is pinned to the host
 //!     twin's formula.
 //!
-//! Host-only: no device, no `#[ignore]`.
+//! Host-only: no device, nothing ignored.
 
 use std::fs;
 use std::path::{Path, PathBuf};
