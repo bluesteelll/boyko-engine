@@ -1039,7 +1039,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_armed.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software 92bf66a1 and hwrt 6c96177a.
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_armed_software.bmp, B/taa_armed_hwrt.bmp).
 sha256_software = "154af3ce60af65a9eaf7d6e271d29416a5c4ac38df20a58791a8bc0a81241aaf"
 sha256_hwrt     = "ce5ca482aff98934eca9a40f0592df2b6ef097f2c709d98f2b68e58c11af741b"
 
@@ -1148,7 +1149,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_armed_basis.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software 0fff8ec9 and hwrt de322954.
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_armed_basis_software.bmp, B/taa_armed_basis_hwrt.bmp).
 sha256_software = "456edff417d43a15faefb35817bfeab6e09f6cb3f6acc6652aea4d69ad26383a"
 sha256_hwrt     = "d25cd02c1d3d55e37786afc1f1f6da543e12397b895571887267228ba72b9454"
 
@@ -1231,7 +1233,8 @@ test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\taa_rcas.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software cfe988f4 and hwrt ab7e62a2.
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_rcas_software.bmp, B/taa_rcas_hwrt.bmp).
 sha256_software = "bcb407481775736b9c1e8823ec95255b26991ea398d6a5036467c66147beac8f"
 sha256_hwrt     = "72959155c152fec9b1f917859c2ae0bce934af86cee9f0a77f24108f20cf9a14"
 
@@ -1392,7 +1395,8 @@ test_name       = "vb_mesh_ssao_screenshot_dump"
 bmp             = "D:\\tmp\\vb_mesh_ssao.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software bd2a1cd0 and hwrt bd2a1cd0.
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/vb_mesh_ssao_software.bmp, B/vb_mesh_ssao_hwrt.bmp).
 sha256_software = "fb578c088640ea69dbe86989cb47d8abe768d20769951f948d0764502d8278e6"
 sha256_hwrt     = "fb578c088640ea69dbe86989cb47d8abe768d20769951f948d0764502d8278e6"
 
