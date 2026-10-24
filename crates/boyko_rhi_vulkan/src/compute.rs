@@ -1765,7 +1765,8 @@ pub fn taa_resolve_spirv() -> &'static [u32] {
 
 /// Render wave PX1a: the `post_final` SPIR-V (see [`POST_FINAL_COMP_SPV`]), bound at boot by
 /// `boyko_app::gpu_scene::GpuSceneBundles::boot` into the `post_final` pipeline and dispatched by
-/// `Renderer::record_post_final` on every frame.
+/// `Renderer::record_post_final` on every frame whose mode word sets the sharpen bit (render wave
+/// PXt: [`post_final_spirv_for`] picks [`post_final_nosharpen_spirv`] otherwise).
 #[inline]
 pub fn post_final_spirv() -> &'static [u32] {
     POST_FINAL_COMP_SPV.as_words()
