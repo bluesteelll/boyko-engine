@@ -434,7 +434,7 @@ impl Renderer<'_> {
         // deferred resolve lights mesh pixels first-class and the r1 ownership gate yields
         // to them. gViewT is UNTOUCHED by r0 (still wholly marcher-produced). ===
 
-        // (0)+(1) Barrier-in: the 3 RGBA8 G-buffer images UNDEFINED → COLOR_ATTACHMENT_OPTIMAL,
+        // (0)+(1) Barrier-in: the 3 G-buffer color images UNDEFINED → COLOR_ATTACHMENT_OPTIMAL,
         // then the depth image UNDEFINED → DEPTH_ATTACHMENT_OPTIMAL.
         // `src=0`/`TOP_OF_PIPE` is the superset-correct FIRST transition for a freshly
         // re-`UNDEFINED`'d image (no prior content to make available).

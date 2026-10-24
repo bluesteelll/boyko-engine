@@ -374,7 +374,7 @@ const PIXELS: u32 = SDF_IMG_W * SDF_IMG_H;
 /// `compute::M2_GRID_PARAMS_BYTES` (kept local to avoid widening the import for one const).
 const M2_GRID_PARAMS_BYTES_LOCAL: usize = B5_CAMERA_UBO_BYTES - M2_GRID_PARAMS_OFFSET;
 
-/// A 4 B/px readback's byte size (the R8G8B8A8 gNormal, the R32 gViewT).
+/// A 4 B/px readback's byte size (the R16G16 gNormal, the R32 gViewT).
 const READBACK_BYTES: u64 = (PIXELS as u64) * 4;
 
 /// The `lit` readback's byte size: [`LIT_FORMAT`] texels (render wave PX1a — RGBA16F, 8 B/px).
@@ -1780,7 +1780,7 @@ fn run_gbuffer_hybrid_m4(
         range: ImageSubresourceRange::DEPTH,
     });
 
-    // --- Render P5-r0 barrier-out: the 3 RGBA8 G-buffer images COLOR_ATTACHMENT_OPTIMAL →
+    // --- Render P5-r0 barrier-out: the 3 G-buffer color images COLOR_ATTACHMENT_OPTIMAL →
     // GENERAL, handing pass A's rasterized mesh fragments to the marcher (a GENUINE
     // raster-write hand-off: COLOR_ATTACHMENT_OUTPUT/COLOR_ATTACHMENT_WRITE →
     // COMPUTE_SHADER/SHADER_READ|SHADER_WRITE). The marcher (under r1) yields mesh-owned
@@ -6789,7 +6789,7 @@ fn run_gbuffer_hybrid_lit_clustered(
         range: ImageSubresourceRange::DEPTH,
     });
 
-    // --- Render P5-r0 barrier-out: the 3 RGBA8 G-buffer images COLOR_ATTACHMENT_OPTIMAL →
+    // --- Render P5-r0 barrier-out: the 3 G-buffer color images COLOR_ATTACHMENT_OPTIMAL →
     // GENERAL (a genuine raster-write hand-off to the marcher). ---
     for tex in [&albedo, &normal, &material] {
         encoder.image_barrier(&ImageBarrierDesc {

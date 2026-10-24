@@ -1477,7 +1477,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         if ((tb.flags & TILE_FLAG_EMPTY) != 0u) {
             // EMPTY fast-path: the marcher's else-if(has_mesh)/else arms with hit = false.
             // PBR MVP-2 (mask == 0 arms): write the base background color to gAlbedo and
-            // gMaterial = (shadow = 1, ao = 1, mask = 0, 1). mask == 0 makes the resolve
+            // gMaterial = (shadow = 1, ao = 1, mask = 0, id hi = 0). mask == 0 makes the resolve
             // PASS THE BASE THROUGH byte-identically (no PBR, no material fetch) — the
             // 0%-gate for background / empty. gNormal is neutral and the id lanes hold id 0
             // (both unread when mask==0).

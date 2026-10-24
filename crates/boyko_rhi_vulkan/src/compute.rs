@@ -700,7 +700,7 @@ embed_spirv! {
 // runtime by binding a different pipeline, NEVER by a dynamic loop bound, so every `[unroll]`
 // slice/step loop stays fully unrolled with ZERO per-pixel runtime cost). All three share the
 // IDENTICAL 5-binding SSAO interface (`shaders/sdf_ssao.comp.hlsl`, GROUP A): gNormal @0 (R,
-// oct + id), gMaterial @1 (R, `.b` = mask), gViewT @2 (R, surface `t`), the `ssao` out @3 (W), the
+// RG16 oct), gMaterial @1 (R, `.b` = mask), gViewT @2 (R, surface `t`), the `ssao` out @3 (W), the
 // 80-byte camera UBO @4 (`gAlbedo` is NOT bound) — so ONE bind-group layout drives all three. Each
 // `.spv` is a DISTINCT size (the baked-const unroll counts differ), so each is its own
 // `SpirvBlob<N>` `static` (a heterogeneous `[_; 3]` array would force a large-variant enum); the

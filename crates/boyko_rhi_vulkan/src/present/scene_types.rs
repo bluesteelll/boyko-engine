@@ -2071,11 +2071,11 @@ pub struct MaterialUploadProbe {
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
-    /// RGBA8 G-buffer color attachments (albedo@0, normal@1, material@2) in the marcher's
+    /// G-buffer color attachments (albedo@0, normal@1, material@2) in the marcher's
     /// exact encoding (mask=1). The caller MUST build it with `color_formats =
-    /// [R8G8B8A8_UNORM; 3]` + 3 per-target blend states (W2-b) and the new
-    /// `gbuffer_mrt.{vs,fs}` shader pair. (Pre-P5 it was a depth-only prepass with one
-    /// throwaway color format.)
+    /// GBUFFER_MRT_COLOR_FORMATS` (RGBA8 / RG16 / RGBA8 since IBL1 P1) + 3 per-target
+    /// blend states (W2-b) and the new `gbuffer_mrt.{vs,fs}` shader pair. (Pre-P5 it was a
+    /// depth-only prepass with one throwaway color format.)
     pub raster_pipeline: &'a VulkanGraphicsPipeline,
     /// The mesh quad's host-visible vertex buffer (position + color).
     pub vertex_buffer: &'a BoundBuffer,
