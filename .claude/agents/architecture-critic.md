@@ -1,7 +1,7 @@
 ---
 name: architecture-critic
 description: Critiques the architectural plan produced by the architect and finds problems. Use after `architect` has returned an implementation plan for a feature/system. Looks for performance bottlenecks, cache optimization mistakes (D-cache and I-cache), hidden synchronization points, violations of project principles, missed edge cases, and bad trade-offs. Returns a list of remarks with priorities and justifications. Part of the iterative architect ↔ critic cycle.
-tools: Read, Write, Glob, Grep, WebSearch, WebFetch
+tools: Read, Write, Glob, Grep, WebSearch, WebFetch, LSP
 model: opus
 effort: xhigh
 ---
