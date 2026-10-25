@@ -68,6 +68,8 @@ pub mod dump;
 pub mod face;
 pub mod field;
 pub mod half;
+// IBL1 R0 + R1: the prefiltered environment's leaves and the studio bake.
+pub mod ibl;
 pub mod levels;
 pub mod marcher;
 pub mod normal;
