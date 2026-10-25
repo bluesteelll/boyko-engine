@@ -109,5 +109,12 @@ required-features = ["emit"]
 name = "post_eval"
 path = "src/bin/post_eval.rs"
 
+# IBL1 R0 (ibl1/cut.md C8, D-P2a): bakes the procedural studio into the committed environment blob
+# `boyko_render/assets/ibl/studio_256.envoct`. The bake is f32 Eval only (IEEE operations, no libm),
+# so no required feature; `boyko_render/tests/ibl_studio_sync.rs` re-bakes and compares the bytes.
+[[bin]]
+name = "bake_ibl_studio"
+path = "src/bin/bake_ibl_studio.rs"
+
 [lints]
 workspace = true

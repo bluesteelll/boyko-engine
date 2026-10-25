@@ -134,6 +134,8 @@ pub mod ddgi_plugin;
 /// the per-frame [`pack_ddgi_update_ubo`](ddgi_update::pack_ddgi_update_ubo) /
 /// [`ddgi_update_dispatch_groups`](ddgi_update::ddgi_update_dispatch_groups) helpers.
 pub mod ddgi_update;
+/// IBL1 R0 + R1: the prefiltered environment light (the committed studio blob and its parse).
+pub mod environment;
 pub mod error;
 /// The gbuffer ⇄ marcher linear-depth contract (mesh foundation M2): the host
 /// [`GBUFFER_T_MAX`](gbuffer_depth::GBUFFER_T_MAX) mirror + the C2 drift guard
