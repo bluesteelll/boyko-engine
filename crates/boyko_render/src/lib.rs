@@ -668,8 +668,9 @@ pub use ssao_config::{
 pub use ssao_plugin::SsaoPlugin;
 pub use tangent::generate_tangents;
 pub use texture::{
-    ColorSpace, OrphanedTextureGpu, TextureAssetsExt, TextureGpu, build_texture_gpu,
-    load_material_folder, mip_levels_for, upload_texture_2d, upload_texture_2d_raw,
+    ColorSpace, MAX_UPLOAD_MIP_LEVELS, MippedCopyPlan, OrphanedTextureGpu, TextureAssetsExt,
+    TextureGpu, build_texture_gpu, load_material_folder, mip_levels_for, mipped_copy_plan,
+    upload_texture_2d, upload_texture_2d_raw, upload_texture_2d_raw_mipped,
 };
 pub use texture_data::TextureData;
 pub use upload::{

@@ -523,6 +523,22 @@ Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
 
 *Byte gate:* `boyko_rhi_vulkan/tests/px0_probe_spv_sync.rs` (as above).
 
+## `ibl_level_probe.comp.hlsl` — the mipped-upload level probe (compute, TEST-ONLY, IBL1 RK-11)
+
+One HAND-WRITTEN source, **no `-D` axis**. Dispatched only by the gpu-ignored
+`ibl_upload_mipped_roundtrip` (`boyko_rhi_vulkan/tests/ibl_upload_mipped.rs`): a 3-level B10G11R11
+chain uploaded by `upload_texture_2d_raw_mipped` must read back level `k` at `SampleLevel(k)` through
+a `MipMode::Linear` sampler.
+
+| Variant | `-D` | `.spv` | dxc `-T` | Notes |
+|---|---|---|---|---|
+| the only one | — | `ibl_level_probe.comp.spv` | `cs_6_0` | set 0: `Texture2D<float4>` + `SamplerState` collapsed to one combined image sampler @0, `RWStructuredBuffer<float4> gOut` @1; no push; `[numthreads(8, 1, 1)]`, invocation `k` stores `SampleLevel(uv 0.5, lod k)` (one `OpImageSampleExplicitLod`) |
+
+Frozen recipe (the header pins it verbatim; no `-O`, no `-D`):
+`dxc.exe -spirv -T cs_6_0 -E main -fspv-target-env=vulkan1.3 ibl_level_probe.comp.hlsl`.
+
+*Byte gate:* `ibl_level_probe_spv_is_the_redxc_of_its_source` (`boyko_rhi_vulkan/tests/ibl_upload_mipped.rs`).
+
 ## `sdf_forward_march.comp.hlsl` — the Forward/VB fused SDF march+shade (compute)
 
 One source `shaders/sdf_forward_march.comp.hlsl`; the `{HAS_MESH} x {VIEWT}` matrix, all four built

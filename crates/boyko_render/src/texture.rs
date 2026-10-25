@@ -360,9 +360,9 @@ fn upload_mipped_pixels(
 /// needed).
 ///
 /// `bytes_per_pixel` is derived from `format`: `R8Unorm` → 1, `R8G8Unorm` → 2,
-/// `R8G8B8A8Unorm` → 4. Any other format is `debug_assert`-unreachable (this seam is used
-/// ONLY by the boot-time LUT uploads today) and returns [`VulkanError::Unsupported`] in
-/// release, rather than silently misreading `bytes`' length.
+/// `R8G8B8A8Unorm` / `B10G11R11UfloatPack32` / `R16G16Sfloat` → 4 (the last two since IBL1
+/// RK-11). Any other format returns [`VulkanError::Unsupported`], rather than silently
+/// misreading `bytes`' length.
 ///
 /// On any partial failure every object created so far is torn down before the error returns
 /// (no leak) — mirrors [`upload_texture_2d`] / [`create_solid_color_texture`](crate::bindless::create_solid_color_texture).
@@ -378,13 +378,8 @@ pub fn upload_texture_2d_raw(
     format: Format,
 ) -> Result<VulkanTexture, VulkanError> {
     debug_assert!(w > 0 && h > 0, "invariant: texture extent is non-zero");
-    let bpp = match format {
-        Format::R8Unorm => 1u64,
-        Format::R8G8Unorm => 2,
-        Format::R8G8B8A8Unorm => 4,
-        // SAFETY-adjacent invariant (not `unsafe`): this seam is used only for the boot-time
-        // LUT uploads today, all of which are one of the three formats above.
-        _ => return Err(VulkanError::Unsupported("upload_texture_2d_raw: unhandled format")),
+    let Some(bpp) = raw_upload_bpp(format) else {
+        return Err(VulkanError::Unsupported("upload_texture_2d_raw: unhandled format"));
     };
     debug_assert_eq!(
         bytes.len() as u64,
@@ -514,6 +509,244 @@ fn upload_raw_pixels(
     })();
 
     // Tear down the setup-class transients. The submit (if it ran) is fence-waited above.
+    // SAFETY: `encoder`/`fence`/`staging` were created on `ctx`; the encoder's only
+    // submission (if any) completed (fence-waited above on the Ok path, or never submitted
+    // on an error path), and each is moved by value ⇒ destroyed once.
+    unsafe {
+        ctx.destroy_command_encoder(encoder);
+        ctx.destroy_fence(fence);
+        ctx.destroy_buffer(staging);
+    }
+    record
+}
+
+/// The most mip levels [`mipped_copy_plan`] plans (a 32768² chain has 16) — the fixed
+/// capacity of the plan's inline region array, so planning allocates nothing.
+pub const MAX_UPLOAD_MIP_LEVELS: usize = 16;
+
+/// The staged-copy plan of a pre-built mip chain (IBL1 RK-11): one [`BufferImageCopy`] per
+/// level, level-major in one staging buffer with no padding between levels, so the copies
+/// are N `mip_level = k` regions of ONE `copy_buffer_to_image` and no level is ever blitted
+/// (a blit would re-filter the bake's own prefiltered levels).
+#[derive(Debug, Clone, Copy)]
+pub struct MippedCopyPlan {
+    /// The per-level regions; only `[..levels]` are meaningful.
+    pub regions: [BufferImageCopy; MAX_UPLOAD_MIP_LEVELS],
+    /// The number of planned levels (`regions[..levels]`).
+    pub levels: u32,
+    /// The total staged byte count — the sum of every level's `w_k * h_k * bpp`.
+    pub total_bytes: u64,
+}
+
+/// Plans the staged upload of a `w`×`h` chain of `levels` mips at `bpp` bytes per texel:
+/// level `k` is `max(w >> k, 1)` × `max(h >> k, 1)` texels at the running byte offset (the
+/// level-major, unpadded layout the IBL bake writes). Pure, so the offsets are host-gated
+/// (`mipped_copy_plan_offsets`).
+///
+/// # Panics
+/// If `levels` is 0 or exceeds [`MAX_UPLOAD_MIP_LEVELS`], or if `w` or `h` is 0 — every
+/// caller passes a chain shape read from an asset header that was validated first.
+pub fn mipped_copy_plan(w: u32, h: u32, levels: u32, bpp: u64) -> MippedCopyPlan {
+    assert!(w > 0 && h > 0, "invariant: a mip chain's base extent is non-zero");
+    assert!(
+        levels >= 1 && levels as usize <= MAX_UPLOAD_MIP_LEVELS,
+        "invariant: 1..={MAX_UPLOAD_MIP_LEVELS} mip levels (got {levels})"
+    );
+    let empty = BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        aspect: ImageAspect::COLOR,
+        mip_level: 0,
+        base_array_layer: 0,
+        layer_count: 1,
+        image_offset_x: 0,
+        image_offset_y: 0,
+        image_offset_z: 0,
+        image_extent_w: 0,
+        image_extent_h: 0,
+        image_extent_d: 1,
+    };
+    let mut regions = [empty; MAX_UPLOAD_MIP_LEVELS];
+    let mut offset = 0u64;
+    for (k, region) in regions.iter_mut().enumerate().take(levels as usize) {
+        let lw = (w >> k).max(1);
+        let lh = (h >> k).max(1);
+        *region = BufferImageCopy {
+            buffer_offset: offset,
+            mip_level: k as u32,
+            image_extent_w: lw,
+            image_extent_h: lh,
+            ..empty
+        };
+        offset += u64::from(lw) * u64::from(lh) * bpp;
+    }
+    MippedCopyPlan { regions, levels, total_bytes: offset }
+}
+
+/// The bytes per texel of the formats [`upload_texture_2d_raw`] and
+/// [`upload_texture_2d_raw_mipped`] accept, or `None` for any other format.
+const fn raw_upload_bpp(format: Format) -> Option<u64> {
+    match format {
+        Format::R8Unorm => Some(1),
+        Format::R8G8Unorm => Some(2),
+        Format::R8G8B8A8Unorm | Format::B10G11R11UfloatPack32 | Format::R16G16Sfloat => Some(4),
+        _ => None,
+    }
+}
+
+/// Uploads a PRE-BUILT `levels`-mip chain (IBL1 RK-11 — the prefiltered environment chain,
+/// whose levels are each a separate GGX convolution and must never be blit-downsampled).
+/// Builds a `w`×`h` `SAMPLED | TRANSFER_DST` texture at `format` with `levels` mips, stages
+/// `bytes` (level-major, unpadded — [`mipped_copy_plan`]'s layout) into ONE staging buffer,
+/// copies every level with its own `mip_level = k` region in one `copy_buffer_to_image`, and
+/// finishes the whole chain `ShaderReadOnlyOptimal` under one barrier pair and one fenced
+/// submit. Sample-ready on return.
+///
+/// Accepts the [`upload_texture_2d_raw`] formats (`B10G11R11UfloatPack32` and `R16G16Sfloat`
+/// among them). On any partial failure every object created so far is torn down before the
+/// error returns.
+///
+/// # Errors
+/// [`VulkanError::Unsupported`] for an unhandled format, a byte count that is not the plan's
+/// total, or an unmapped staging buffer; any RHI create / submit error otherwise.
+///
+/// # Panics
+/// As [`mipped_copy_plan`]: a zero extent or a level count outside
+/// `1..=`[`MAX_UPLOAD_MIP_LEVELS`].
+pub fn upload_texture_2d_raw_mipped(
+    ctx: &VulkanContext,
+    w: u32,
+    h: u32,
+    levels: u32,
+    bytes: &[u8],
+    format: Format,
+) -> Result<VulkanTexture, VulkanError> {
+    let Some(bpp) = raw_upload_bpp(format) else {
+        return Err(VulkanError::Unsupported("upload_texture_2d_raw_mipped: unhandled format"));
+    };
+    let plan = mipped_copy_plan(w, h, levels, bpp);
+    if bytes.len() as u64 != plan.total_bytes {
+        return Err(VulkanError::Unsupported(
+            "upload_texture_2d_raw_mipped: byte count is not the chain's planned total",
+        ));
+    }
+    let texture = ctx.create_texture(&TextureDesc {
+        width: w,
+        height: h,
+        depth: 1,
+        format,
+        dimension: TextureDimension::D2,
+        usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+        array_layers: 1,
+        mip_levels: levels,
+        view_format: None,
+    })?;
+    if let Err(e) = upload_mipped_chain(ctx, &texture, &plan, bytes) {
+        // SAFETY: `texture` was just created on `ctx`, owned exclusively here, and the
+        // upload's own submit (if any ran) is fence-waited internally before this error
+        // could surface; destroy it once on this edge.
+        unsafe { ctx.destroy_texture(texture) };
+        return Err(e);
+    }
+    Ok(texture)
+}
+
+/// The staged upload + layout-transition submit for [`upload_texture_2d_raw_mipped`]: the
+/// [`upload_raw_pixels`] shape with the whole chain in one staging buffer and one region per
+/// level.
+fn upload_mipped_chain(
+    ctx: &VulkanContext,
+    texture: &VulkanTexture,
+    plan: &MippedCopyPlan,
+    bytes: &[u8],
+) -> Result<(), VulkanError> {
+    let staging = ctx.create_buffer(&BufferDesc {
+        size: plan.total_bytes,
+        usage: BufferUsage::TRANSFER_SRC,
+        location: MemoryLocation::HostVisibleCoherent,
+    })?;
+    let Some(dst) = ctx.buffer_mapped_ptr(&staging) else {
+        // SAFETY: `staging` was just created, never submitted; destroy it once on this edge.
+        unsafe { ctx.destroy_buffer(staging) };
+        return Err(VulkanError::Unsupported("staging buffer not host-mapped"));
+    };
+    // SAFETY: `dst` is the persistently-mapped first byte of the host-coherent staging buffer,
+    // which is exactly `plan.total_bytes` long (just created); the caller checked
+    // `bytes.len() == plan.total_bytes`, so the copy stays inside the mapping; `bytes` is a
+    // distinct allocation, so the ranges cannot overlap; this is the unique writer before any
+    // submission binds the buffer, and the buffer outlives the copy. Host-coherent ⇒ no flush.
+    unsafe {
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), dst.as_ptr(), bytes.len());
+    }
+
+    let mut encoder = match ctx.create_command_encoder() {
+        Ok(e) => e,
+        Err(e) => {
+            // SAFETY: `staging` was just created, never submitted; destroy once.
+            unsafe { ctx.destroy_buffer(staging) };
+            return Err(e);
+        }
+    };
+    let fence = match ctx.create_fence(false) {
+        Ok(f) => f,
+        Err(e) => {
+            // SAFETY: `encoder`/`staging` were just created, never submitted; destroy each
+            // once.
+            unsafe {
+                ctx.destroy_command_encoder(encoder);
+                ctx.destroy_buffer(staging);
+            }
+            return Err(e);
+        }
+    };
+
+    let chain = ImageSubresourceRange {
+        aspect: ImageAspect::COLOR,
+        base_mip_level: 0,
+        level_count: plan.levels,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    let record = (|| -> Result<(), VulkanError> {
+        encoder.begin()?;
+        // UNDEFINED → TRANSFER_DST_OPTIMAL over every level (the copy destinations).
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture,
+            src_stage: BarrierStage::TOP_OF_PIPE,
+            dst_stage: BarrierStage::TRANSFER,
+            src_access: BarrierAccess::NONE,
+            dst_access: BarrierAccess::TRANSFER_WRITE,
+            old_layout: ImageLayout::Undefined,
+            new_layout: ImageLayout::TransferDstOptimal,
+            range: chain,
+        });
+        encoder.copy_buffer_to_image(
+            &staging,
+            texture,
+            ImageLayout::TransferDstOptimal,
+            &plan.regions[..plan.levels as usize],
+        );
+        // TRANSFER_DST_OPTIMAL → SHADER_READ_ONLY_OPTIMAL over every level. The readers are
+        // compute (the deferred resolve, the VB family, the SDF forward march) and fragment
+        // (`forward_opaque`) shaders, so both stages wait.
+        encoder.image_barrier(&ImageBarrierDesc {
+            texture,
+            src_stage: BarrierStage::TRANSFER,
+            dst_stage: BarrierStage::FRAGMENT_SHADER | BarrierStage::COMPUTE_SHADER,
+            src_access: BarrierAccess::TRANSFER_WRITE,
+            dst_access: BarrierAccess::SHADER_READ,
+            old_layout: ImageLayout::TransferDstOptimal,
+            new_layout: ImageLayout::ShaderReadOnlyOptimal,
+            range: chain,
+        });
+        encoder.end()?;
+        let queue = ctx.rhi_queue();
+        queue.submit(&encoder, &fence)?;
+        ctx.wait_fence(&fence, u64::MAX)?;
+        Ok(())
+    })();
+
     // SAFETY: `encoder`/`fence`/`staging` were created on `ctx`; the encoder's only
     // submission (if any) completed (fence-waited above on the Ok path, or never submitted
     // on an error path), and each is moved by value ⇒ destroyed once.
@@ -979,6 +1212,25 @@ impl OrphanedTextureGpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// IBL1 RK-11: the 256² × 7 environment chain stages level-major with no padding — the
+    /// offsets the bake writes its levels at (`boyko_shaderdsl::ibl`), 4 B per B10G11R11
+    /// texel, 349,504 B in all — and each region names its own `mip_level` and extent.
+    #[test]
+    fn mipped_copy_plan_offsets() {
+        let plan = mipped_copy_plan(256, 256, 7, 4);
+        assert_eq!(plan.levels, 7);
+        let offsets: Vec<u64> = plan.regions[..7].iter().map(|r| r.buffer_offset).collect();
+        assert_eq!(offsets, [0, 262_144, 327_680, 344_064, 348_160, 349_184, 349_440]);
+        assert_eq!(plan.total_bytes, 349_504);
+        for (k, r) in plan.regions[..7].iter().enumerate() {
+            assert_eq!(r.mip_level, k as u32, "level {k} region names its own mip");
+            assert_eq!((r.image_extent_w, r.image_extent_h), (256 >> k, 256 >> k));
+            assert_eq!(r.image_extent_d, 1);
+        }
+        assert_eq!(raw_upload_bpp(Format::B10G11R11UfloatPack32), Some(4));
+        assert_eq!(raw_upload_bpp(Format::R16G16Sfloat), Some(4));
+    }
 
     #[test]
     fn mip_levels_for_power_of_two_square() {
