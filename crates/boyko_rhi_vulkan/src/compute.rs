@@ -89,6 +89,10 @@ macro_rules! embed_spirv {
     };
 }
 
+// IBL1 R1: the 20 `-D REFL=1` twins of the lit producers and their boot selector (`LitProducer`).
+mod refl;
+pub use refl::*;
+
 embed_spirv! {
     /// The committed SPIR-V for step 0c (`buffer[i] = i*2 + 1`).
     ///

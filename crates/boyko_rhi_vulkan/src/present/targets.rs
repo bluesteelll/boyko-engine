@@ -15,10 +15,10 @@ use crate::compute::{HZB_LEVELS_PER_PASS, LOCAL_SIZE_X, MAX_HZB_PASSES};
 use crate::device::VulkanContext;
 use crate::ffi::*;
 use crate::memory::BoundBuffer;
-use crate::rhi_impl::{Vulkan, VulkanBindGroup};
+use crate::rhi_impl::{Vulkan, VulkanBindGroup, VulkanBindGroupLayout};
 use crate::texture::{VulkanTexture, VulkanTextureView};
 
-use super::scene_types::{GBufferScene, HzbPlan, MAX_HZB_LEVELS};
+use super::scene_types::{EnvMapBinding, GBufferScene, HzbPlan, MAX_HZB_LEVELS};
 use super::{FRAMES_IN_FLIGHT, SwapchainError};
 
 // Doc-link scope: types referenced only from doc-comments (the targets document how
@@ -1004,22 +1004,20 @@ impl ForwardTargets {
         let mut set1_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for (i, slot) in set1_slots.iter_mut().enumerate() {
-            let desc = BindGroupDesc {
-                layout: forward_layout1,
-                entries: &[
-                    BindGroupEntry::CombinedImage {
-                        texture: scene.csm_cascade_texture,
-                        sampler: scene.csm_compare_sampler,
-                    },
-                    BindGroupEntry::UniformBuffer { buffer: &scene.csm_cascade_ring[i] },
-                    BindGroupEntry::CombinedImage {
-                        texture: scene.shadow_atlas_texture,
-                        sampler: scene.shadow_atlas_sampler,
-                    },
-                    BindGroupEntry::UniformBuffer { buffer: scene.shadow_atlas_ubo },
-                ],
-            };
-            match RhiDevice::create_bind_group(ctx, &desc) {
+            let base = [
+                BindGroupEntry::CombinedImage {
+                    texture: scene.csm_cascade_texture,
+                    sampler: scene.csm_compare_sampler,
+                },
+                BindGroupEntry::UniformBuffer { buffer: &scene.csm_cascade_ring[i] },
+                BindGroupEntry::CombinedImage {
+                    texture: scene.shadow_atlas_texture,
+                    sampler: scene.shadow_atlas_sampler,
+                },
+                BindGroupEntry::UniformBuffer { buffer: scene.shadow_atlas_ubo },
+            ];
+            // IBL1 R1: an armed boot's `forward_layout1` carries the environment @4 (5 entries).
+            match create_set_with_env::<4, 5>(ctx, forward_layout1, scene.env_map, base.into_iter()) {
                 Ok(g) => *slot = Some(g),
                 Err(e) => {
                     // SAFETY: every drained `set1` slot + the fully-built `set0` ring + the
@@ -2549,6 +2547,75 @@ const RESOLVE_HWRT_DENOISE_BINDINGS: usize = RESOLVE_HWRT_BINDINGS + 1;
 #[cfg(feature = "hwrt")]
 const RESOLVE_HWRT_VIS_MV_BINDINGS: usize = RESOLVE_HWRT_DENOISE_BINDINGS + 2;
 
+// ---- IBL1 R1 (D-P2c): the environment map's binding in each lit-producer set -----------------
+//
+// One combined image sampler at the FIRST index past each set an armed boot extends; the shaders
+// spell the same numbers (`deferred_pbr.hlsl`'s `ENV_MAP_BINDING`, `[[vk::binding(4, 1)]]` /
+// `[[vk::binding(9, 1)]]` in the forward / VB producers — `refl_six_site_census` pins them to
+// these constants). The VIS / VIS+MV sets (23 / 25) carry none: those stages write no `lit`.
+
+/// The software (+ TERMINATOR_WRAP) resolve's environment binding: past `gPbr` @19.
+pub const ENV_BINDING_RESOLVE_SOFTWARE: u32 = 20;
+/// The RESOLVE_INLINE-hwrt resolve's environment binding: past `gDepthHw` @21.
+pub const ENV_BINDING_RESOLVE_HWRT: u32 = 22;
+/// The DENOISED resolve's environment binding: past `gShadowVis` @22.
+pub const ENV_BINDING_RESOLVE_DENOISED: u32 = 23;
+/// `ForwardTargets::set1`'s environment binding (Set 1 of `forward_opaque`, `sdf_forward_march`,
+/// `vb_resolve`, `vb_shade`): past the four shadow-table entries.
+pub const ENV_BINDING_FORWARD_SET1: u32 = 4;
+/// The VB split Set 1's environment binding: past the hwrt `gShadowVis` @8 — the SAME number on
+/// `not(hwrt)`, whose set ends at @7 (the REFL modules are shared by both builds).
+pub const ENV_BINDING_VB_SPLIT_SET1: u32 = 9;
+/// An armed software resolve set's entry count (20 + the environment).
+const RESOLVE_SOFTWARE_REFL_BINDINGS: usize = RESOLVE_SOFTWARE_TOTAL_BINDINGS + 1;
+const _: () = assert!(ENV_BINDING_RESOLVE_SOFTWARE as usize == RESOLVE_SOFTWARE_TOTAL_BINDINGS);
+const _: () = assert!(RESOLVE_SOFTWARE_REFL_BINDINGS <= boyko_rhi::MAX_BIND_GROUP_BINDINGS);
+/// An armed RESOLVE_INLINE-hwrt set's entry count (22 + the environment).
+#[cfg(feature = "hwrt")]
+const RESOLVE_HWRT_REFL_BINDINGS: usize = RESOLVE_HWRT_BINDINGS + 1;
+#[cfg(feature = "hwrt")]
+const _: () = assert!(ENV_BINDING_RESOLVE_HWRT as usize == RESOLVE_HWRT_BINDINGS);
+#[cfg(feature = "hwrt")]
+const _: () = assert!(RESOLVE_HWRT_REFL_BINDINGS <= boyko_rhi::MAX_BIND_GROUP_BINDINGS);
+/// An armed DENOISED set's entry count (23 + the environment): the fullest resolve-family set this
+/// rung builds, under the cap of 25, so AD-26's raise stays R2's (cut §7 Q4).
+#[cfg(feature = "hwrt")]
+const RESOLVE_HWRT_DENOISED_REFL_BINDINGS: usize = RESOLVE_HWRT_DENOISE_BINDINGS + 1;
+#[cfg(feature = "hwrt")]
+const _: () = assert!(ENV_BINDING_RESOLVE_DENOISED as usize == RESOLVE_HWRT_DENOISE_BINDINGS);
+#[cfg(feature = "hwrt")]
+const _: () = assert!(RESOLVE_HWRT_DENOISED_REFL_BINDINGS <= boyko_rhi::MAX_BIND_GROUP_BINDINGS);
+
+/// Creates a bind group from EXACTLY `N` entries — the exact-fill tripwire (an under-fill panics
+/// on the missing entry, an over-fill is a debug panic) every resolve-family set keeps.
+fn create_bind_group_exact<'a, const N: usize>(
+    ctx: &VulkanContext,
+    layout: &VulkanBindGroupLayout,
+    mut entries: impl Iterator<Item = BindGroupEntry<'a, Vulkan>>,
+) -> Result<VulkanBindGroup, crate::error::VulkanError> {
+    let filled: [BindGroupEntry<'a, Vulkan>; N] =
+        core::array::from_fn(|_| entries.next().expect("invariant: exact-fill: the chained entries yield N"));
+    let extra = entries.next();
+    debug_assert!(extra.is_none(), "invariant: exact-fill: no entry past {N}");
+    RhiDevice::create_bind_group(ctx, &BindGroupDesc::<Vulkan> { layout, entries: &filled })
+}
+
+/// IBL1 R1 (D-P2c): a lit-producer set — `base` exact-filled at `N`, or, on an ARMED boot
+/// (`env` is `Some`), `base` + the environment at index `N` exact-filled at `N_ARMED` against the
+/// armed layout. Unarmed is byte-identical to the pre-IBL1 set.
+fn create_set_with_env<'a, const N: usize, const N_ARMED: usize>(
+    ctx: &VulkanContext,
+    layout: &VulkanBindGroupLayout,
+    env: Option<EnvMapBinding<'a>>,
+    base: impl Iterator<Item = BindGroupEntry<'a, Vulkan>>,
+) -> Result<VulkanBindGroup, crate::error::VulkanError> {
+    const { assert!(N_ARMED == N + 1, "an armed set is its base + the environment") };
+    match env {
+        None => create_bind_group_exact::<N>(ctx, layout, base),
+        Some(e) => create_bind_group_exact::<N_ARMED>(ctx, layout, base.chain(core::iter::once(e.entry()))),
+    }
+}
+
 /// Lane fix/hwrt-shadow-ray-origin: the ONE spelling of the raster-depth entry every HWRT
 /// resolve-family set chains at [`HWRT_DEPTH_BINDING`] — the SAME depth-aspect sampled view +
 /// `depth_sampler` the marcher binds at its @1 (`vocab_set`), so the resolve's producer test reads
@@ -2561,6 +2628,21 @@ fn hwrt_depth_entry<'a>(
     slot: usize,
 ) -> BindGroupEntry<'a, Vulkan> {
     BindGroupEntry::SampledImage { texture: &depth_ring[slot], sampler: scene.depth_sampler }
+}
+
+/// IBL1 R1: the layout a DENOISED-stage set is built against — the 24-entry DENOISED-REFL layout
+/// on an armed boot, else the shared 23-entry VIS/DENOISED layout.
+///
+/// # Panics
+/// On an armed boot whose DENOISED-REFL layout is absent — the boot builds the two together, so
+/// that is a boot defect, not a runtime condition.
+#[cfg(feature = "hwrt")]
+fn denoised_refl_layout<'a>(scene: &GBufferScene<'a>, denoise_layout: &'a VulkanBindGroupLayout) -> &'a VulkanBindGroupLayout {
+    match (scene.env_map, scene.resolve_layout_denoised_refl_hwrt) {
+        (None, _) => denoise_layout,
+        (Some(_), Some(refl)) => refl,
+        (Some(_), None) => panic!("invariant: an armed boot builds the DENOISED-REFL layout with the DENOISED pipeline"),
+    }
 }
 
 /// The six per-in-flight-slot G-buffer image RINGS' slot views the resolve set binds — bundled so
@@ -3883,31 +3965,22 @@ impl DeferredSets {
             // (it holds resource refs), so MOVE the shared entries into 0..=18 via a by-value
             // iterator chained with the `gPbr` entry — the same idiom the HWRT TLAS append below
             // uses (`resolve_set_hwrt`'s `chained` builder).
-            let mut chained = shared.into_iter().chain(core::iter::once(
+            let chained = shared.into_iter().chain(core::iter::once(
                 BindGroupEntry::StorageImage { texture: &core.pbr[slot] },
             ));
-            let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_SOFTWARE_TOTAL_BINDINGS] =
-                core::array::from_fn(|_| {
-                    chained.next().expect(
-                        "invariant: the chained iterator yields exactly RESOLVE_SOFTWARE_TOTAL_BINDINGS entries",
-                    )
-                });
             // The software resolve set is EXACT-FILL at `RESOLVE_SOFTWARE_TOTAL_BINDINGS` (20: the
             // 19 shared bindings + `gPbr` @19), under the cap of `MAX_BIND_GROUP_BINDINGS` (25).
             // Keeping it EXACT (not `<= cap`) preserves the UNDER-FILL tripwire (a missing binding)
             // AND the over-fill tripwire. `RESOLVE_SOFTWARE_BINDINGS` (19) itself is UNTOUCHED and
             // stays the HWRT-family derivation base — every HWRT resolve variant still fills its
             // OWN separate count (21/22/24), guarded by its OWN constant.
-            debug_assert_eq!(
-                entries.len(),
-                RESOLVE_SOFTWARE_TOTAL_BINDINGS,
-                "invariant: the software resolve set must declare EXACTLY {RESOLVE_SOFTWARE_TOTAL_BINDINGS} bindings (exact-fill)"
-            );
-            let desc = BindGroupDesc::<Vulkan> {
-                layout: scene.resolve_layout,
-                entries: &entries,
-            };
-            match RhiDevice::create_bind_group(ctx, &desc) {
+            // IBL1 R1: an armed boot appends the environment @20 (21 entries, the armed layout).
+            match create_set_with_env::<RESOLVE_SOFTWARE_TOTAL_BINDINGS, RESOLVE_SOFTWARE_REFL_BINDINGS>(
+                ctx,
+                scene.resolve_layout,
+                scene.env_map,
+                chained,
+            ) {
                 Ok(g) => resolve_slots[slot] = Some(g),
                 Err(e) => {
                     // SAFETY: the resolve slots already built [0..slot) + the whole vocab ring were
@@ -5200,7 +5273,7 @@ impl DeferredSets {
                         // entries — each element is placed exactly once. The UBO entry mirrors the
                         // csm/atlas `BindGroupEntry::UniformBuffer` shape; the depth entry is the
                         // marcher's own `vocab_set` @1 spelling (`hwrt_depth_entry`).
-                        let mut chained = shared
+                        let chained = shared
                             .into_iter()
                             .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
                                 accel: tlas[slot],
@@ -5209,19 +5282,14 @@ impl DeferredSets {
                                 buffer: &scene.ray_shadow_ubo[slot],
                             }))
                             .chain(core::iter::once(hwrt_depth_entry(scene, &core.depth, slot)));
-                        let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_BINDINGS] =
-                            core::array::from_fn(|_| {
-                                chained.next().expect(
-                                    "invariant: the chained iterator yields exactly RESOLVE_HWRT_BINDINGS entries",
-                                )
-                            });
-                        debug_assert_eq!(
-                            entries.len(),
-                            RESOLVE_HWRT_BINDINGS,
-                            "invariant: the HWRT resolve set must declare EXACTLY {RESOLVE_HWRT_BINDINGS} bindings (exact-fill)"
-                        );
-                        let desc = BindGroupDesc::<Vulkan> { layout: hwrt_layout, entries: &entries };
-                        match RhiDevice::create_bind_group(ctx, &desc) {
+                        // `RESOLVE_HWRT_BINDINGS` (22) exact-fill; IBL1 R1: + the environment @22
+                        // on an armed boot (23, the armed layout).
+                        match create_set_with_env::<RESOLVE_HWRT_BINDINGS, RESOLVE_HWRT_REFL_BINDINGS>(
+                            ctx,
+                            hwrt_layout,
+                            scene.env_map,
+                            chained,
+                        ) {
                             Ok(g) => *dst = Some(g),
                             Err(e) => {
                                 failure = Some(e);
@@ -6563,8 +6631,14 @@ impl GBufferTargets {
         // RESOLVE_INLINE-hwrt set (via `resolve_software_entries` + TLAS @19 + soft-shadow UBO @20
         // + raster depth @21), so they cannot drift. Exact-fill at `RESOLVE_HWRT_DENOISE_BINDINGS`
         // (23).
+        //
+        // IBL1 R1 (ruling 123 (1)): the VIS ring keeps the 23-entry layout; an armed boot's DENOISED
+        // ring is built against the 24-entry DENOISED-REFL layout with the environment @23.
+        let denoised_layout = denoised_refl_layout(scene, denoise_layout);
         let build_resolve_set = |slot: usize,
-                                 vis_target: &[VulkanTexture; FRAMES_IN_FLIGHT]|
+                                 vis_target: &[VulkanTexture; FRAMES_IN_FLIGHT],
+                                 stage_layout: &VulkanBindGroupLayout,
+                                 env: Option<EnvMapBinding<'_>>|
          -> Result<VulkanBindGroup, crate::error::VulkanError> {
             let imgs = ResolveSlotImages {
                 albedo: &albedo[slot],
@@ -6576,7 +6650,7 @@ impl GBufferTargets {
             };
             let shared =
                 resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
-            let mut chained = shared
+            let chained = shared
                 .into_iter()
                 .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
                     accel: tlas[slot],
@@ -6588,26 +6662,19 @@ impl GBufferTargets {
                 .chain(core::iter::once(BindGroupEntry::StorageImage {
                     texture: &vis_target[slot],
                 }));
-            let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_DENOISE_BINDINGS] =
-                core::array::from_fn(|_| {
-                    chained.next().expect(
-                        "invariant: the chained iterator yields exactly RESOLVE_HWRT_DENOISE_BINDINGS entries",
-                    )
-                });
-            debug_assert_eq!(
-                entries.len(),
-                RESOLVE_HWRT_DENOISE_BINDINGS,
-                "invariant: the VIS/DENOISED resolve set must declare EXACTLY {RESOLVE_HWRT_DENOISE_BINDINGS} bindings (exact-fill)"
-            );
-            let desc = BindGroupDesc::<Vulkan> { layout: denoise_layout, entries: &entries };
-            RhiDevice::create_bind_group(ctx, &desc)
+            create_set_with_env::<RESOLVE_HWRT_DENOISE_BINDINGS, RESOLVE_HWRT_DENOISED_REFL_BINDINGS>(
+                ctx,
+                stage_layout,
+                env,
+                chained,
+            )
         };
 
         // (2) The VIS resolve set ring (`gShadowVis` @22 = `shadow_vis[i]`, the WRITE target).
         let mut vis_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for (slot, dst) in vis_slots.iter_mut().enumerate() {
-            match build_resolve_set(slot, vis_ring) {
+            match build_resolve_set(slot, vis_ring, denoise_layout, None) {
                 Ok(g) => *dst = Some(g),
                 Err(e) => {
                     // SAFETY: the [0..slot) vis slots + the UBO ring were created on `ctx`, never
@@ -6634,7 +6701,7 @@ impl GBufferTargets {
         let mut den_slots: [Option<VulkanBindGroup>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for (slot, dst) in den_slots.iter_mut().enumerate() {
-            match build_resolve_set(slot, final_ring) {
+            match build_resolve_set(slot, final_ring, denoised_layout, scene.env_map) {
                 Ok(g) => *dst = Some(g),
                 Err(e) => {
                     // SAFETY: the [0..slot) den slots + the whole VIS ring + the UBO ring were
@@ -7229,7 +7296,7 @@ impl GBufferTargets {
             };
             let shared =
                 resolve_software_entries(scene, &imgs, slot, cluster_grid_buf, light_index_buf);
-            let mut chained = shared
+            let chained = shared
                 .into_iter()
                 .chain(core::iter::once(BindGroupEntry::AccelerationStructure {
                     accel: tlas[slot],
@@ -7241,14 +7308,13 @@ impl GBufferTargets {
                 .chain(core::iter::once(BindGroupEntry::StorageImage {
                     texture: &tout[slot],
                 }));
-            let entries: [BindGroupEntry<'_, Vulkan>; RESOLVE_HWRT_DENOISE_BINDINGS] =
-                core::array::from_fn(|_| {
-                    chained.next().expect(
-                        "invariant: the chained iterator yields exactly RESOLVE_HWRT_DENOISE_BINDINGS entries",
-                    )
-                });
-            let dsc = BindGroupDesc::<Vulkan> { layout: denoise_layout, entries: &entries };
-            match RhiDevice::create_bind_group(ctx, &dsc) {
+            // IBL1 R1: an armed boot's DENOISED-temporal set takes the DENOISED-REFL layout + env @23.
+            match create_set_with_env::<RESOLVE_HWRT_DENOISE_BINDINGS, RESOLVE_HWRT_DENOISED_REFL_BINDINGS>(
+                ctx,
+                denoised_refl_layout(scene, denoise_layout),
+                scene.env_map,
+                chained,
+            ) {
                 Ok(g) => *dst = Some(g),
                 Err(_) => {
                     // SAFETY: the [0..slot) denoised-temporal sets + the whole temporal set ring + the
@@ -9414,7 +9480,12 @@ impl GBufferTargets {
                         };
                         #[cfg(not(feature = "hwrt"))]
                         let entries = base;
-                        match RhiDevice::create_bind_group(ctx, &BindGroupDesc::<Vulkan> { layout, entries: &entries }) {
+                        // IBL1 R1: an armed boot appends the environment @9 (its layout's last entry).
+                        #[cfg(feature = "hwrt")]
+                        let set = create_set_with_env::<9, 10>(ctx, layout, scene.env_map, entries.into_iter());
+                        #[cfg(not(feature = "hwrt"))]
+                        let set = create_set_with_env::<8, 9>(ctx, layout, scene.env_map, entries.into_iter());
+                        match set {
                             Ok(g) => *dst = Some(g),
                             Err(_) => {
                                 ok = false;

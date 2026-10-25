@@ -2625,6 +2625,10 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
         // sets built; byte-identical).
         #[cfg(feature = "hwrt")]
         resolve_layout_denoise_hwrt: None,
+        // IBL1 R1: an unarmed harness — no DENOISED-REFL layout, no environment map.
+        #[cfg(feature = "hwrt")]
+        resolve_layout_denoised_refl_hwrt: None,
+        env_map: None,
         #[cfg(feature = "hwrt")]
         atrous_layout_denoise_hwrt: None,
         #[cfg(feature = "hwrt")]
@@ -3756,6 +3760,10 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
         // sets built; byte-identical).
         #[cfg(feature = "hwrt")]
         resolve_layout_denoise_hwrt: None,
+        // IBL1 R1: an unarmed harness — no DENOISED-REFL layout, no environment map.
+        #[cfg(feature = "hwrt")]
+        resolve_layout_denoised_refl_hwrt: None,
+        env_map: None,
         #[cfg(feature = "hwrt")]
         atrous_layout_denoise_hwrt: None,
         #[cfg(feature = "hwrt")]
@@ -8823,6 +8831,10 @@ fn run_showcase_body_ddgi(
         // sets built; byte-identical).
         #[cfg(feature = "hwrt")]
         resolve_layout_denoise_hwrt: None,
+        // IBL1 R1: an unarmed harness — no DENOISED-REFL layout, no environment map.
+        #[cfg(feature = "hwrt")]
+        resolve_layout_denoised_refl_hwrt: None,
+        env_map: None,
         #[cfg(feature = "hwrt")]
         atrous_layout_denoise_hwrt: None,
         #[cfg(feature = "hwrt")]
@@ -10161,6 +10173,10 @@ fn run_showcase_body(
         // sets built; byte-identical).
         #[cfg(feature = "hwrt")]
         resolve_layout_denoise_hwrt: None,
+        // IBL1 R1: an unarmed harness — no DENOISED-REFL layout, no environment map.
+        #[cfg(feature = "hwrt")]
+        resolve_layout_denoised_refl_hwrt: None,
+        env_map: None,
         #[cfg(feature = "hwrt")]
         atrous_layout_denoise_hwrt: None,
         #[cfg(feature = "hwrt")]

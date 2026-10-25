@@ -269,7 +269,22 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     } else {
         boyko_rhi_vulkan::swapchain::SurfaceFormatPick::Production
     };
-    let mut host = match WindowHost::boot(ctx, &desc, format_pick) {
+    // IBL1 R1 (D-P2e): the boot-frozen environment arming — read ONCE, before the GPU boot that
+    // builds either the base or the `-D REFL=1` lit producers. `try_resource` degrades a host
+    // without `EnvironmentPlugin` to `EnvSource::Off` (unarmed, byte-identical).
+    //
+    // `BOYKO_IBL_ARM=studio` is the measurement-only arming knob (ruling 124 (5)): it arms the
+    // boot with the studio chain WITHOUT the app asking, so an existing pin can be re-dumped armed
+    // with no `EnvironmentLight` and compared byte for byte (`ibl_env_paths.rs`'s
+    // `ibl_armed_no_env_matches_base_*`; the cut's W3b re-dumps). Env-only, like
+    // `BOYKO_SDF_MESH=host` — deliberately not an `EnvironmentConfig` value.
+    let env_cfg = if std::env::var("BOYKO_IBL_ARM").is_ok_and(|v| v == "studio") {
+        Some(boyko_render::environment::EnvironmentConfig { source: boyko_render::environment::EnvSource::Studio })
+    } else {
+        app.world().try_resource::<boyko_render::environment::EnvironmentConfig>().copied()
+    };
+    let (resolved_env, env_asset) = boyko_render::environment::resolve_environment(env_cfg.as_ref());
+    let mut host = match WindowHost::boot(ctx, &desc, format_pick, env_asset.as_ref()) {
         Ok(h) => h,
         Err(e) => {
             crate::diag::report_boot_stage_failed("window host", &e);
@@ -698,6 +713,15 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // seam's source of truth, but the World Resource must ALSO be genuinely authoritative
     // for any ECS-side reader.
     app.world_mut().insert_resource(resolved_render_path);
+    // IBL1 R1 (cut addendum C, open question 2): OVERRIDE `EnvironmentPlugin`'s unarmed carrier
+    // with the boot's — the same post-boot override — and, on arming, mark the light table dirty
+    // so the first fold after the boot writes the environment row even when no light changed.
+    app.world_mut().insert_resource(resolved_env);
+    if resolved_env.armed
+        && let Some(dirty) = app.world_mut().try_resource_mut::<boyko_render::light::LightTableDirty>()
+    {
+        dirty.0 = true;
+    }
     // Rung R9a (plan P2-d): OVERWRITE `SsaoPlugin`'s inert default boot-freeze snapshot with
     // the REAL one — the SAME post-boot override discipline as `resolved_render_path` above.
     // Under a non-Deferred resolved path the pre-light consumer set is boot-committed; the

@@ -3030,8 +3030,10 @@ fn pick_physical_device(
 //   UniformBuffer:        @5, @13, @15, @18            → 4
 // Sum = 4 + 6 + 5 + 4 = 19. (@10 is the SDF edit-list StorageBuffer, not a combined image; the four
 // combined-image-samplers are the CSM @12, punctual atlas @14, and the two DDGI atlases @16/@17.)
-/// The resolve set's per-stage COMBINED_IMAGE_SAMPLER need (@12 CSM, @14 atlas, @16/@17 DDGI).
-const RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS: u32 = 4;
+/// The resolve set's per-stage COMBINED_IMAGE_SAMPLER need (@12 CSM, @14 atlas, @16/@17 DDGI, and
+/// on an armed boot the IBL1 environment chain — @20 software, @22 hwrt, @23 DENOISED; critique
+/// O3: the guard counts the fullest set any boot builds).
+const RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS: u32 = 5;
 /// The resolve set's per-stage STORAGE_IMAGE need (@0/@1/@2/@3 gbuffer + @7 gViewT + @11 gSsao).
 const RESOLVE_NEED_STORAGE_IMAGES: u32 = 6;
 /// The resolve set's per-stage STORAGE_BUFFER need (@4 material, @6 light, @8/@9 cluster, @10 edits).
@@ -4767,8 +4769,9 @@ mod tests {
         let generous = limits_blob(1_000_000, 1_000_000, 1_000_000, 1_000_000, 1_000_000);
         assert!(check_resolve_descriptor_limits(&generous).is_ok());
 
-        // Sanity: the needs the check enforces are the pinned per-type counts (19 total).
-        assert_eq!(RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS, 4);
+        // Sanity: the needs the check enforces are the pinned per-type counts (20 total: the 19 of
+        // the I0 table + the IBL1 environment's combined image sampler on an armed boot).
+        assert_eq!(RESOLVE_NEED_COMBINED_IMAGE_SAMPLERS, 5);
         assert_eq!(RESOLVE_NEED_STORAGE_IMAGES, 6);
         assert_eq!(RESOLVE_NEED_STORAGE_BUFFERS, 5);
         assert_eq!(RESOLVE_NEED_UNIFORM_BUFFERS, 4);
@@ -4777,7 +4780,7 @@ mod tests {
                 + RESOLVE_NEED_STORAGE_IMAGES
                 + RESOLVE_NEED_STORAGE_BUFFERS
                 + RESOLVE_NEED_UNIFORM_BUFFERS,
-            19
+            20
         );
     }
 

@@ -227,6 +227,7 @@ impl WindowHost {
         ctx: &'static VulkanContext,
         desc: &WindowDesc,
         format_pick: SurfaceFormatPick,
+        env: Option<&boyko_render::environment::EnvAsset<'_>>,
     ) -> Result<Self, HostBootError> {
         // BOOT-1 F4, P0: drain this thread's queue before the window exists, so the thread's 5 s
         // hung clock restarts after the multi-second device boot and the window is never born
@@ -310,7 +311,7 @@ impl WindowHost {
         }
         let composite_extent = (native_extent.0 * ssaa_scale, native_extent.1 * ssaa_scale);
 
-        let gpu = GpuSceneBundles::boot(ctx, composite_extent, swap_format);
+        let gpu = GpuSceneBundles::boot(ctx, composite_extent, swap_format, env);
 
         Ok(Self {
             renderer,

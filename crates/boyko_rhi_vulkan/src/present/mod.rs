@@ -72,6 +72,7 @@ pub use frame_driver::{
 pub use passes::vb::VbRecordProbe;
 pub use scene_types::{
     AaActivation, BrickActivation, ClusterCullHierDispatch, CsmDepthActivation, CullMembers, DdgiUpdateActivation,
+    EnvMapBinding,
     GBUFFER_IDENTITY_INSTANCE, GBUFFER_INSTANCE_MODEL_BYTES, GBUFFER_PUSH_BYTES,
     GBufferMeshDraw, GBufferScene, HZB_DUMP_FLAG_DEPTH_EARLY, HZB_DUMP_HEADER_BYTES,
     HZB_DUMP_HEADER_SCALAR_WORDS, HZB_DUMP_HEADER_WORDS, HZB_DUMP_MAGIC,
@@ -89,7 +90,9 @@ pub use scene_types::{ShadowVisActivation, TlasBuildActivation};
 pub use surface::{Surface, SurfaceFormatPick, choose_surface_format, swapchain_format_is_srgb};
 pub use swapchain::{PresentModeConfig, Swapchain};
 pub use targets::{
-    GBUFFER_MRT_COLOR_FORMATS, GBufferFrame, GBufferTargets, GNORMAL_FORMAT, LIT_BACKGROUND_SCENE, LIT_FORMAT,
+    ENV_BINDING_FORWARD_SET1, ENV_BINDING_RESOLVE_DENOISED, ENV_BINDING_RESOLVE_HWRT, ENV_BINDING_RESOLVE_SOFTWARE,
+    ENV_BINDING_VB_SPLIT_SET1, GBUFFER_MRT_COLOR_FORMATS, GBufferFrame, GBufferTargets, GNORMAL_FORMAT,
+    LIT_BACKGROUND_SCENE, LIT_FORMAT,
     NAN_INJECT_TEXEL, NAN_INJECT_TEXEL_BITS, VB_THIN_NORMAL_FORMAT, gbuffer_mrt_color_formats_with,
 };
 

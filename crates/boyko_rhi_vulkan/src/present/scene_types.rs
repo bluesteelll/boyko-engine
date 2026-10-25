@@ -2068,6 +2068,26 @@ pub struct MaterialUploadProbe {
     pub regions: u32,
 }
 
+/// IBL1 R1: the environment chain an ARMED boot binds in every lit-producer set — the
+/// boot-uploaded B10G11R11 octahedral chain and its `MipMode::Linear` sampler, bound as ONE
+/// combined image sampler (`gEnvMap` + `gEnvSamp` in `env_ibl.hlsli`'s include contract).
+#[derive(Clone, Copy)]
+pub struct EnvMapBinding<'a> {
+    /// The 7-level prefiltered chain (`ShaderReadOnlyOptimal`, immutable after the boot upload).
+    pub texture: &'a VulkanTexture,
+    /// The chain's sampler (linear filter, linear mips, `maxLod` unclamped, clamp to edge).
+    pub sampler: &'a VulkanSampler,
+}
+
+impl<'a> EnvMapBinding<'a> {
+    /// The set entry that binds the chain.
+    #[inline]
+    #[must_use]
+    pub fn entry(self) -> boyko_rhi::BindGroupEntry<'a, crate::rhi_impl::Vulkan> {
+        boyko_rhi::BindGroupEntry::CombinedImage { texture: self.texture, sampler: self.sampler }
+    }
+}
+
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
@@ -2893,6 +2913,17 @@ pub struct GBufferScene<'a> {
     /// stable-populate shape.
     #[cfg(feature = "hwrt")]
     pub resolve_layout_denoise_hwrt: Option<&'a VulkanBindGroupLayout>,
+    /// IBL1 R1 (ruling 123 (1)): an ARMED boot's DENOISED-REFL layout — the 23
+    /// [`Self::resolve_layout_denoise_hwrt`] entries + the environment @23 (24). The VIS stage keeps
+    /// the 23-entry layout (it reads no environment), so the DENOISED sets alone are built against
+    /// this one. `None` on an unarmed boot or a non-RT device.
+    #[cfg(feature = "hwrt")]
+    pub resolve_layout_denoised_refl_hwrt: Option<&'a VulkanBindGroupLayout>,
+    /// IBL1 R1 (D-P2c): the prefiltered environment chain an ARMED boot binds in every
+    /// lit-producer set, as one combined image sampler at the set's first free index (software
+    /// resolve @20, hwrt @22, DENOISED @23, `ForwardTargets::set1` @4, the VB split Set 1 @9).
+    /// `None` on an unarmed boot: every set is today's, byte for byte.
+    pub env_map: Option<EnvMapBinding<'a>>,
     /// HW-RT rung 3a: the STABLE 6-binding à-trous bind-group LAYOUT (the same layout
     /// [`ShadowVisActivation::atrous_layout`] carries when the per-frame gate opens). Populated from
     /// the boot à-trous pipeline REGARDLESS of the per-frame [`Self::shadow`] activation — `Some`

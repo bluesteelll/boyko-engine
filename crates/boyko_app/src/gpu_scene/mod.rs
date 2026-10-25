@@ -37,18 +37,16 @@ use boyko_rhi_vulkan::compute::{
     LOCAL_SIZE_X, M4_LEVEL_PARAMS_BYTES, SDF_FORWARD_MARCH_PUSH_BYTES,
     TILE_BOUND_BYTES, TILE_SIZE,
     cluster_cull_hier_spirv, cluster_cull_spirv,
-    csm_depth_fs_spirv, csm_depth_vs_spirv, deferred_pbr_spirv,
-    deferred_pbr_wrap_spirv,
+    csm_depth_fs_spirv, csm_depth_vs_spirv,
     depth_prepass_fs_spirv, depth_prepass_vs_spirv,
-    encode_edit_list, forward_opaque_fs_spirv, forward_opaque_froxel_fs_spirv, forward_opaque_vs_spirv,
+    encode_edit_list, forward_opaque_vs_spirv, LitProducer,
     forward_sky_fs_spirv, forward_sky_vs_spirv,
     fullscreen_sample_vs_spirv, fxaa_fs_spirv,
     gbuffer_mrt_fs_spirv,
     gbuffer_mrt_pm_fs_spirv, gbuffer_mrt_pm_vs_spirv, gbuffer_mrt_tex_fs_spirv,
     gbuffer_mrt_tex_vs_spirv, gbuffer_mrt_vs_spirv, HZB_BUILD_PUSH_BYTES, hzb_build_spirv,
     interp_instances_spirv, punctual_depth_fs_spirv,
-    post_final_spirv_for, present_sample_fs_spirv, punctual_depth_vs_spirv, sdf_forward_march_spirv, sdf_forward_march_sdfonly_spirv,
-    sdf_forward_march_sdfonly_viewt_spirv, sdf_forward_march_viewt_spirv,
+    post_final_spirv_for, present_sample_fs_spirv, punctual_depth_vs_spirv,
     sdf_gbuffer_composite_spirv, sdf_probe_update_spirv,
     sdf_ssao_spirv_variant, smaa_blend_fs_spirv, smaa_edge_fs_spirv, smaa_weight_fs_spirv,
     SSAO_ATROUS_PUSH_BYTES, ssao_atrous_read8_spirv, ssao_atrous_spirv, ssao_atrous_write8_spirv,
@@ -57,10 +55,8 @@ use boyko_rhi_vulkan::compute::{
     VB_BATCH_DESC_STRIDE, VB_CULL_LAYOUT_BINDINGS, VB_CULL_UNIFORM_BYTES, vb_batch_cull_spirv,
     VIEWT_FROM_DEPTH_PUSH_BYTES, VIEWT_FROM_DEPTH_RZ_PUSH_BYTES,
     vb_classify_count_spirv, vb_classify_scan_spirv, vb_classify_scatter_spirv,
-    sdf_mesh_shadow_spirv, vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv, vb_resolve_spirv,
-    vb_resolve_froxel_spirv,
-    sdf_ssao_vb_spirv, vb_shade_spirv, vb_shade_froxel_spirv, vb_shade_split_spirv, vb_shade_split_tex_spirv,
-    vb_shade_tex_spirv, vb_shade_tex_froxel_spirv, viewt_from_depth_spirv, viewt_from_depth_rz_spirv,
+    sdf_mesh_shadow_spirv, vb_geo_spirv, vb_raster_fs_spirv, vb_raster_vs_spirv,
+    sdf_ssao_vb_spirv, viewt_from_depth_spirv, viewt_from_depth_rz_spirv,
 };
 use boyko_rhi_vulkan::device::VulkanContext;
 use boyko_rhi_vulkan::ffi::VkDescriptorSet;
@@ -103,14 +99,21 @@ use boyko_rhi_vulkan::accel_build::{
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::compute::{
-    BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_denoised_spirv,
-    deferred_pbr_hwrt_spirv, deferred_pbr_vis_mv_spirv, deferred_pbr_vis_spirv,
+    BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv,
+    deferred_pbr_vis_mv_spirv, deferred_pbr_vis_spirv,
     gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, gbuffer_mrt_mvpm_fs_spirv,
     gbuffer_mrt_mvpm_vs_spirv, shadow_atrous_spirv, shadow_atrous_vb_spirv, shadow_temporal_spirv, vb_geo_mv_spirv,
-    vb_shade_split_hwrt_spirv, vb_shade_split_tex_hwrt_spirv, vb_shadow_vis_spirv,
+    vb_shadow_vis_spirv,
 };
 #[cfg(feature = "hwrt")]
 use boyko_rhi_vulkan::swapchain::{ShadowVisActivation, TlasBuildActivation};
+// IBL1 R1: the environment binding numbers live beside the set builders (`present::targets`);
+// the `swapchain` compatibility shim re-exports only the pre-`present` surface.
+use boyko_rhi_vulkan::present::{
+    ENV_BINDING_FORWARD_SET1, ENV_BINDING_RESOLVE_SOFTWARE, ENV_BINDING_VB_SPLIT_SET1, EnvMapBinding,
+};
+#[cfg(feature = "hwrt")]
+use boyko_rhi_vulkan::present::{ENV_BINDING_RESOLVE_DENOISED, ENV_BINDING_RESOLVE_HWRT};
 use boyko_rhi_vulkan::texture::VulkanTexture;
 use boyko_sdf_math::SdfEdit;
 
@@ -925,6 +928,77 @@ impl MotionVecResources {
     }
 }
 
+/// IBL1 R1 (D-P2e): the prefiltered environment chain of an ARMED boot — the 7-level B10G11R11
+/// octahedral image (uploaded once by `boyko_render::upload_texture_2d_raw_mipped`, never
+/// blitted) and its sampler (linear filter, `MipMode::Linear` so `SampleLevel(k)` reaches every
+/// level, clamp to edge — the bordered tiles keep every fetch inside). Immutable after the boot;
+/// destroyed with the bundles.
+pub(crate) struct EnvGpu {
+    texture: VulkanTexture,
+    sampler: boyko_rhi_vulkan::rhi_impl::VulkanSampler,
+}
+
+impl EnvGpu {
+    /// Uploads `asset`'s chain and creates its sampler (boot, cold).
+    fn create(ctx: &VulkanContext, asset: &boyko_render::environment::EnvAsset<'_>) -> Self {
+        let h = asset.header;
+        let texture = boyko_render::upload_texture_2d_raw_mipped(
+            ctx,
+            h.tile,
+            h.tile,
+            h.levels,
+            asset.chain,
+            Format::B10G11R11UfloatPack32,
+        )
+        .expect("invariant: the environment chain uploads at an armed boot");
+        let sampler = RhiDevice::create_sampler(
+            ctx,
+            &SamplerDesc {
+                mag_filter: boyko_rhi::Filter::Linear,
+                min_filter: boyko_rhi::Filter::Linear,
+                address_mode: boyko_rhi::AddressMode::ClampToEdge,
+                mip: MipMode::Linear,
+                ..SamplerDesc::default()
+            },
+        )
+        .expect("invariant: the environment sampler creates at an armed boot");
+        Self { texture, sampler }
+    }
+}
+
+/// IBL1 R1 (D-P2c): the environment map's layout entry — one combined image sampler at `binding`.
+const fn env_layout_entry(binding: u32, stage: ShaderStage) -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry { binding, count: 1, kind: DescriptorKind::CombinedImageSampler, stage }
+}
+
+/// A bind-group layout's entries held inline (at most [`MAX_BIND_GROUP_BINDINGS`]), so an armed
+/// boot's `+1` layouts cost no allocation.
+struct LayoutEntries {
+    buf: [BindGroupLayoutEntry; MAX_BIND_GROUP_BINDINGS],
+    len: usize,
+}
+
+impl LayoutEntries {
+    fn as_slice(&self) -> &[BindGroupLayoutEntry] {
+        &self.buf[..self.len]
+    }
+}
+
+/// `base`, plus `env` appended when `Some` (an armed boot's environment entry).
+///
+/// # Panics
+/// If the result would exceed [`MAX_BIND_GROUP_BINDINGS`] — a const-asserted layout budget.
+fn env_layout(base: &[BindGroupLayoutEntry], env: Option<BindGroupLayoutEntry>) -> LayoutEntries {
+    let len = base.len() + usize::from(env.is_some());
+    assert!(len <= MAX_BIND_GROUP_BINDINGS, "invariant: an armed layout stays within the binding cap");
+    let mut buf = [env_layout_entry(0, ShaderStage::COMPUTE); MAX_BIND_GROUP_BINDINGS];
+    buf[..base.len()].copy_from_slice(base);
+    if let Some(e) = env {
+        buf[base.len()] = e;
+    }
+    LayoutEntries { buf, len }
+}
+
 /// The static-resource half of the windowed G-buffer scene (host plan R3):
 /// every pipeline / layout / sampler / seeded buffer `render_gbuffer_frame`
 /// needs beyond the swapchain + the extent-dependent `GBufferFrame` targets.
@@ -1069,6 +1143,12 @@ pub(crate) struct GpuSceneBundles {
     // ── Resolve (pass C) ─────────────────────────────────────────────────────
     resolve_pipeline: ComputePipeline,
     resolve_layout: VulkanBindGroupLayout,
+    /// IBL1 R1: the boot-frozen environment arming — `true` iff the boot uploaded an environment
+    /// chain ([`Self::env_gpu`]) and builds every lit producer from its `-D REFL=1` twin.
+    env_armed: bool,
+    /// IBL1 R1: the prefiltered environment chain + its `MipMode::Linear` sampler, created at an
+    /// ARMED boot only (the FFI/GPU-contiguity class: an immutable, boot-uploaded image).
+    env_gpu: Option<EnvGpu>,
     /// Render terminator-softening: the SOFTWARE-RESOLVE-ONLY diffuse light-wrap variant
     /// pipeline (`deferred_pbr_wrap.comp`, `-D TERMINATOR_WRAP=1`), built UNCONDITIONALLY at
     /// boot alongside [`Self::resolve_pipeline`] (mirroring that pipeline's own always-built
@@ -1097,7 +1177,7 @@ pub(crate) struct GpuSceneBundles {
     /// `scene.shadow = Some(..)` (the step-7 gate; kept `None` this rung, so unbound ⇒ byte-identical).
     #[cfg(feature = "hwrt")]
     shadow_denoise_pipelines:
-        Option<(ComputePipeline, ComputePipeline, VulkanBindGroupLayout)>,
+        Option<(ComputePipeline, ComputePipeline, VulkanBindGroupLayout, Option<VulkanBindGroupLayout>)>,
     /// HW-RT rung 3a: the à-trous spatial-denoise filter pipelines + their SHARED DEDICATED
     /// 6-binding layout { `gVisIn` @0, `gVisOut` @1, the normal @2, `gViewT` @3, the
     /// `ResolvedShadowDenoise` UBO @4, the camera UBO @5 } + a 4-byte `{ uint step; }` push, as
@@ -1812,8 +1892,20 @@ impl GpuSceneBundles {
     /// error (the `MeshAssetsExt::register_mesh` precedent). The window / WSI
     /// links that can legitimately fail on end-user machines are handled by
     /// `WindowHost::boot`'s typed error BEFORE this runs.
-    pub(crate) fn boot(ctx: &VulkanContext, composite: (u32, u32), swap_format: Format) -> Self {
+    pub(crate) fn boot(
+        ctx: &VulkanContext,
+        composite: (u32, u32),
+        swap_format: Format,
+        env: Option<&boyko_render::environment::EnvAsset<'_>>,
+    ) -> Self {
         let (cw, ch) = composite;
+        // IBL1 R1 (D-P2b/D-P2e): the boot-frozen environment arming. Armed ⇒ every lit producer
+        // is built from its `-D REFL=1` twin (`LitProducer::spirv`), every lit-writing layout
+        // carries the environment's combined image sampler at its first free binding, and the
+        // chain is uploaded once into `env_gpu`. Unarmed ⇒ today's modules, layouts and sets,
+        // byte for byte; no image, no sampler.
+        let env_armed = env.is_some();
+        let env_gpu = env.map(|asset| EnvGpu::create(ctx, asset));
         debug_assert!(cw > 0 && ch > 0, "invariant: boot composite extent is non-zero");
         // SSAA (W1): `composite` is ALREADY 2× native when `WindowHost::boot` armed SSAA (it
         // folds the scale into `composite_extent` before calling this fn), so every buffer
@@ -2263,7 +2355,7 @@ impl GpuSceneBundles {
 
         // ── The deferred resolve: the 16-entry layout + the compute pipeline
         // (mirroring the showcase's `resolve_entries`).
-        let resolve_cs = RhiDevice::create_shader_module(device, deferred_pbr_spirv())
+        let resolve_cs = RhiDevice::create_shader_module(device, LitProducer::DeferredPbr.spirv(env_armed))
             .expect("invariant: deferred resolve compute shader module create");
         let resolve_entries = [
             BindGroupLayoutEntry { binding: 0, count: 1, kind: DescriptorKind::StorageImage, stage: ShaderStage::COMPUTE },
@@ -2304,10 +2396,14 @@ impl GpuSceneBundles {
             kind: DescriptorKind::StorageImage,
             stage: ShaderStage::COMPUTE,
         });
+        // IBL1 R1 (D-P2c): an armed boot's software resolve adds the environment @20 (21 entries).
+        if env_armed {
+            resolve_software_layout_entries.push(env_layout_entry(ENV_BINDING_RESOLVE_SOFTWARE, ShaderStage::COMPUTE));
+        }
         debug_assert_eq!(
             resolve_software_layout_entries.len(),
-            20,
-            "invariant: the software resolve layout is EXACT-FILL at 20 (19 shared + gPbr @19)"
+            20 + usize::from(env_armed),
+            "invariant: the software resolve layout is EXACT-FILL at 20 (19 shared + gPbr @19), 21 armed (+ env @20)"
         );
         let resolve_layout = RhiDevice::create_bind_group_layout(
             device,
@@ -2330,7 +2426,7 @@ impl GpuSceneBundles {
         // unconditionally (device-agnostic — not RT-gated) alongside `resolve_pipeline`, reusing
         // the SAME `resolve_layout` (the variant adds no binding; see `deferred_pbr_wrap_spirv`'s
         // doc). Selected per-frame by `scene`'s `terminator_wrap` gate.
-        let resolve_wrap_cs = RhiDevice::create_shader_module(device, deferred_pbr_wrap_spirv())
+        let resolve_wrap_cs = RhiDevice::create_shader_module(device, LitProducer::DeferredPbrWrap.spirv(env_armed))
             .expect("invariant: terminator-wrap deferred resolve compute shader module create");
         let resolve_pipeline_wrap = RhiDevice::create_compute_pipeline(
             device,
@@ -2354,7 +2450,7 @@ impl GpuSceneBundles {
         // UBO) + binding 21 (the raster depth image the shadow-ray origin's producer test reads).
         #[cfg(feature = "hwrt")]
         let resolve_pipeline_hwrt = ctx.ray_query_enabled().then(|| {
-            let hwrt_cs = RhiDevice::create_shader_module(device, deferred_pbr_hwrt_spirv())
+            let hwrt_cs = RhiDevice::create_shader_module(device, LitProducer::DeferredPbrHwrt.spirv(env_armed))
                 .expect("invariant: HWRT deferred resolve compute shader module create");
             let mut hwrt_entries = resolve_entries.to_vec();
             hwrt_entries.push(BindGroupLayoutEntry {
@@ -2385,6 +2481,10 @@ impl GpuSceneBundles {
                 kind: DescriptorKind::SampledImage,
                 stage: ShaderStage::COMPUTE,
             });
+            // IBL1 R1 (D-P2c): armed ⇒ the environment @22 (23 entries).
+            if env_armed {
+                hwrt_entries.push(env_layout_entry(ENV_BINDING_RESOLVE_HWRT, ShaderStage::COMPUTE));
+            }
             let hwrt_layout = RhiDevice::create_bind_group_layout(
                 device,
                 &BindGroupLayoutDesc { entries: &hwrt_entries },
@@ -2425,6 +2525,7 @@ impl GpuSceneBundles {
             ComputePipeline,
             ComputePipeline,
             VulkanBindGroupLayout,
+            Option<VulkanBindGroupLayout>,
         )> = ctx.ray_query_enabled().then(|| {
             // The 23-binding VIS/DENOISED layout: the 19 software resolve bindings (0..=18),
             // binding 19 (`AccelerationStructure` — the VIS trace target), binding 20 (the rung-1b
@@ -2461,6 +2562,18 @@ impl GpuSceneBundles {
                 &BindGroupLayoutDesc { entries: &denoise_entries },
             )
             .expect("invariant: rung-3a VIS/DENOISED resolve bind-group layout create");
+            // IBL1 R1 (ruling 123 (1), critique W1 option (a)): the VIS stage writes no `lit` and
+            // never reads the environment, so it keeps the 23-entry layout; an armed boot's
+            // DENOISED stage gets its OWN 24-entry layout (the 23 + the environment @23), so no
+            // pipeline declares a binding it never reads.
+            let denoised_refl_layout = env_armed.then(|| {
+                let entries = env_layout(
+                    &denoise_entries,
+                    Some(env_layout_entry(ENV_BINDING_RESOLVE_DENOISED, ShaderStage::COMPUTE)),
+                );
+                RhiDevice::create_bind_group_layout(device, &BindGroupLayoutDesc { entries: entries.as_slice() })
+                    .expect("invariant: IBL1 DENOISED-REFL resolve bind-group layout create")
+            });
 
             // The VIS variant traces — bake the SAME `SHADOW_RAY_COUNT` spec-const (id 0) as the
             // RESOLVE_INLINE resolve so `mesh_vis` is bit-identical. The DENOISED variant does NOT
@@ -2480,7 +2593,7 @@ impl GpuSceneBundles {
             )
             .expect("invariant: rung-3a VIS resolve compute pipeline create");
             let denoised_cs =
-                RhiDevice::create_shader_module(device, deferred_pbr_denoised_spirv())
+                RhiDevice::create_shader_module(device, LitProducer::DeferredPbrHwrtDenoised.spirv(env_armed))
                     .expect("invariant: rung-3a DENOISED resolve compute shader module create");
             let denoised_pipeline = RhiDevice::create_compute_pipeline(
                 device,
@@ -2488,7 +2601,7 @@ impl GpuSceneBundles {
                     module: &denoised_cs,
                     entry: c"main",
                     push_constant_bytes: COMPOSITE_PUSH_CONSTANT_BYTES,
-                    bind_group_layout: Some(&denoise_layout),
+                    bind_group_layout: Some(denoised_refl_layout.as_ref().unwrap_or(&denoise_layout)),
                     spec_constants: &[],
                 },
             )
@@ -2499,7 +2612,7 @@ impl GpuSceneBundles {
                 RhiDevice::destroy_shader_module(device, denoised_cs);
                 RhiDevice::destroy_shader_module(device, vis_cs);
             }
-            (vis_pipeline, denoised_pipeline, denoise_layout)
+            (vis_pipeline, denoised_pipeline, denoise_layout, denoised_refl_layout)
         });
 
         // ── HW-RT rung 3a: the à-trous filter pipelines + their 6-binding layout { `gVisIn` @0,
@@ -3185,9 +3298,15 @@ impl GpuSceneBundles {
             let mut chained = vb_split_layout1_base.into_iter().chain(core::iter::once(ninth));
             core::array::from_fn(|_| chained.next().expect("invariant: exactly 9 entries"))
         };
+        // IBL1 R1 (D-P2c, critique O2): armed ⇒ the environment @9 on BOTH builds — the REFL
+        // `vb_shade_split` {base, tex} modules are shared by them, so the number is one.
+        let vb_split_layout1_entries = env_layout(
+            &vb_split_layout1_entries,
+            env_armed.then(|| env_layout_entry(ENV_BINDING_VB_SPLIT_SET1, ShaderStage::COMPUTE)),
+        );
         let vb_split_layout1 = RhiDevice::create_bind_group_layout(
             device,
-            &BindGroupLayoutDesc { entries: &vb_split_layout1_entries },
+            &BindGroupLayoutDesc { entries: vb_split_layout1_entries.as_slice() },
         )
         .expect("invariant: R9b vb_shade_split Set-1 bind-group layout create");
 
@@ -3401,10 +3520,7 @@ impl GpuSceneBundles {
         // `GpuSceneBundles::boot` panic. `forward_opaque.fs.hlsl`'s shadow bindings were
         // renumbered to Set 1 instead (that shader's doc), so Forward is a plain 2-set
         // `[Set0, Set1]` pipeline — no placeholder needed.
-        let forward_layout1 = RhiDevice::create_bind_group_layout(
-            device,
-            &BindGroupLayoutDesc {
-                entries: &[
+        let forward_layout1_base = [
                     BindGroupLayoutEntry {
                         binding: 0,
                         count: 1,
@@ -3429,8 +3545,18 @@ impl GpuSceneBundles {
                         kind: DescriptorKind::UniformBuffer,
                         stage: ShaderStage::FRAGMENT | ShaderStage::COMPUTE,
                     },
-                ],
-            },
+                ];
+        // IBL1 R1 (D-P2c): armed ⇒ the environment @4, `FRAGMENT | COMPUTE` like every other entry
+        // (this ONE layout is Set 1 of `forward_opaque` AND of the compute `sdf_forward_march` /
+        // VB resolve+shade family — the `0973eec2` stage-flag lesson). Every other pipeline on
+        // this layout gets a legal superset.
+        let forward_layout1_entries = env_layout(
+            &forward_layout1_base,
+            env_armed.then(|| env_layout_entry(ENV_BINDING_FORWARD_SET1, ShaderStage::FRAGMENT | ShaderStage::COMPUTE)),
+        );
+        let forward_layout1 = RhiDevice::create_bind_group_layout(
+            device,
+            &BindGroupLayoutDesc { entries: forward_layout1_entries.as_slice() },
         )
         .expect("invariant: Forward Set-1 bind-group layout create");
         // The UNIFIED Set-0 (core) layout — 7 bindings, shared by EVERY Forward-family pipeline
@@ -3492,7 +3618,7 @@ impl GpuSceneBundles {
         .expect("invariant: Forward Set-0 bind-group layout create");
         let forward_vs = RhiDevice::create_shader_module(device, forward_opaque_vs_spirv())
             .expect("invariant: Forward mesh vertex shader module create");
-        let forward_fs = RhiDevice::create_shader_module(device, forward_opaque_fs_spirv())
+        let forward_fs = RhiDevice::create_shader_module(device, LitProducer::ForwardOpaqueFs.spirv(env_armed))
             .expect("invariant: Forward mesh fragment shader module create");
         // RD6 / D-DS: the family is built through one closure so its cull members differ from
         // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
@@ -3631,7 +3757,7 @@ impl GpuSceneBundles {
         let forward_plus_vs = RhiDevice::create_shader_module(device, forward_opaque_vs_spirv())
             .expect("invariant: ForwardPlus opaque vertex shader module create");
         let forward_plus_fs =
-            RhiDevice::create_shader_module(device, forward_opaque_froxel_fs_spirv())
+            RhiDevice::create_shader_module(device, LitProducer::ForwardOpaqueFroxelFs.spirv(env_armed))
                 .expect("invariant: ForwardPlus opaque froxel fragment shader module create");
         // RD6 / D-DS: the family is built through one closure so its cull members differ from
         // the existing pipeline in `cull_mode` ALONE (same modules, layout, push range).
@@ -3719,7 +3845,7 @@ impl GpuSceneBundles {
             },
         )
         .expect("invariant: sdf_forward_march Set-0 bind-group layout create");
-        let sdf_forward_march_cs = RhiDevice::create_shader_module(device, sdf_forward_march_spirv())
+        let sdf_forward_march_cs = RhiDevice::create_shader_module(device, LitProducer::SdfForwardMarch.spirv(env_armed))
             .expect("invariant: sdf_forward_march HAS_MESH compute shader module create");
         let sdf_forward_march_pipeline = ctx
             .create_compute_pipeline_forward(
@@ -3734,7 +3860,7 @@ impl GpuSceneBundles {
             )
             .expect("invariant: sdf_forward_march HAS_MESH compute pipeline create");
         let sdf_forward_march_sdfonly_cs =
-            RhiDevice::create_shader_module(device, sdf_forward_march_sdfonly_spirv())
+            RhiDevice::create_shader_module(device, LitProducer::SdfForwardMarchSdfonly.spirv(env_armed))
                 .expect("invariant: sdf_forward_march mesh-less compute shader module create");
         let sdf_forward_march_sdfonly_pipeline = ctx
             .create_compute_pipeline_forward(
@@ -3750,7 +3876,7 @@ impl GpuSceneBundles {
             .expect("invariant: sdf_forward_march mesh-less compute pipeline create");
         // TAA-under-VB: the two `VIEWT` gViewT-producing siblings (same layout, same push).
         let sdf_forward_march_viewt_cs =
-            RhiDevice::create_shader_module(device, sdf_forward_march_viewt_spirv())
+            RhiDevice::create_shader_module(device, LitProducer::SdfForwardMarchViewt.spirv(env_armed))
                 .expect("invariant: sdf_forward_march HAS_MESH+VIEWT compute shader module create");
         let sdf_forward_march_viewt_pipeline = ctx
             .create_compute_pipeline_forward(
@@ -3765,7 +3891,7 @@ impl GpuSceneBundles {
             )
             .expect("invariant: sdf_forward_march HAS_MESH+VIEWT compute pipeline create");
         let sdf_forward_march_sdfonly_viewt_cs =
-            RhiDevice::create_shader_module(device, sdf_forward_march_sdfonly_viewt_spirv())
+            RhiDevice::create_shader_module(device, LitProducer::SdfForwardMarchSdfonlyViewt.spirv(env_armed))
                 .expect("invariant: sdf_forward_march mesh-less VIEWT compute shader module create");
         let sdf_forward_march_sdfonly_viewt_pipeline = ctx
             .create_compute_pipeline_forward(
@@ -4836,6 +4962,8 @@ impl GpuSceneBundles {
             resolve_pipeline,
             resolve_layout,
             resolve_pipeline_wrap,
+            env_armed,
+            env_gpu,
             #[cfg(feature = "hwrt")]
             resolve_pipeline_hwrt,
             #[cfg(feature = "hwrt")]
@@ -5252,7 +5380,7 @@ impl GpuSceneBundles {
         geometry_set: &boyko_rhi_vulkan::geometry_bindless::VulkanGeometryBindlessSet,
     ) {
         let device = ctx;
-        let vb_resolve_cs = RhiDevice::create_shader_module(device, vb_resolve_spirv())
+        let vb_resolve_cs = RhiDevice::create_shader_module(device, LitProducer::VbResolve.spirv(self.env_armed))
             .expect("invariant: VB resolve compute shader module create");
         let vb_resolve_pipeline = ctx
             .create_compute_pipeline_vb(
@@ -5390,7 +5518,7 @@ impl GpuSceneBundles {
             RhiDevice::destroy_shader_module(device, vb_classify_scatter_cs);
         }
 
-        let vb_shade_cs = RhiDevice::create_shader_module(device, vb_shade_spirv())
+        let vb_shade_cs = RhiDevice::create_shader_module(device, LitProducer::VbShade.spirv(self.env_armed))
             .expect("invariant: VB shade compute shader module create");
         let vb_shade_pipeline = ctx
             .create_compute_pipeline_vb(
@@ -5444,7 +5572,7 @@ impl GpuSceneBundles {
     ) {
         let device = ctx;
 
-        let vb_shade_tex_cs = RhiDevice::create_shader_module(device, vb_shade_tex_spirv())
+        let vb_shade_tex_cs = RhiDevice::create_shader_module(device, LitProducer::VbShadeTex.spirv(self.env_armed))
             .expect("invariant: VB shade TEXTURED compute shader module create");
         let vb_shade_tex_pipeline = ctx
             .create_compute_pipeline_vb_textured(
@@ -5511,7 +5639,7 @@ impl GpuSceneBundles {
         }
         self.vb_geo_pipeline = Some(vb_geo_pipeline);
 
-        let vb_shade_split_cs = RhiDevice::create_shader_module(device, vb_shade_split_spirv())
+        let vb_shade_split_cs = RhiDevice::create_shader_module(device, LitProducer::VbShadeSplit.spirv(self.env_armed))
             .expect("invariant: R9b vb_shade_split compute shader module create");
         let vb_shade_split_pipeline = ctx
             .create_compute_pipeline_vb(
@@ -5533,7 +5661,7 @@ impl GpuSceneBundles {
         self.vb_shade_split_pipeline = Some(vb_shade_split_pipeline);
 
         if let Some(bindless) = bindless {
-            let cs = RhiDevice::create_shader_module(device, vb_shade_split_tex_spirv())
+            let cs = RhiDevice::create_shader_module(device, LitProducer::VbShadeSplitTex.spirv(self.env_armed))
                 .expect("invariant: R9b vb_shade_split TEXTURED compute shader module create");
             let p = ctx
                 .create_compute_pipeline_vb_textured(
@@ -5583,7 +5711,7 @@ impl GpuSceneBundles {
             self.vb_geo_mv_pipeline = Some(vb_geo_mv_pipeline);
 
             let vb_shade_split_hwrt_cs =
-                RhiDevice::create_shader_module(device, vb_shade_split_hwrt_spirv())
+                RhiDevice::create_shader_module(device, LitProducer::VbShadeSplitHwrt.spirv(self.env_armed))
                     .expect("invariant: R9d vb_shade_split HWRT compute shader module create");
             let vb_shade_split_hwrt_pipeline = ctx
                 .create_compute_pipeline_vb(
@@ -5605,7 +5733,7 @@ impl GpuSceneBundles {
             self.vb_shade_split_hwrt_pipeline = Some(vb_shade_split_hwrt_pipeline);
 
             if let Some(bindless) = bindless {
-                let cs = RhiDevice::create_shader_module(device, vb_shade_split_tex_hwrt_spirv())
+                let cs = RhiDevice::create_shader_module(device, LitProducer::VbShadeSplitTexHwrt.spirv(self.env_armed))
                     .expect("invariant: R9d vb_shade_split TEXTURED HWRT compute shader module create");
                 let p = ctx
                     .create_compute_pipeline_vb_textured(
@@ -5920,7 +6048,7 @@ impl GpuSceneBundles {
 
         // `vb_resolve_froxel` — the SAME 3-set shape `build_vb_resolve_pipeline` builds, against
         // the wider `vb_layout0_froxel`.
-        let vb_resolve_froxel_cs = RhiDevice::create_shader_module(device, vb_resolve_froxel_spirv())
+        let vb_resolve_froxel_cs = RhiDevice::create_shader_module(device, LitProducer::VbResolveFroxel.spirv(self.env_armed))
             .expect("invariant: VB resolve FROXEL compute shader module create");
         let vb_resolve_froxel_pipeline = ctx
             .create_compute_pipeline_vb(
@@ -5943,7 +6071,7 @@ impl GpuSceneBundles {
 
         // `vb_shade_froxel` — the SAME 3-set shape `build_vb_classify_pipelines`'s own
         // `vb_shade` build uses, against the wider `vb_layout0_froxel`.
-        let vb_shade_froxel_cs = RhiDevice::create_shader_module(device, vb_shade_froxel_spirv())
+        let vb_shade_froxel_cs = RhiDevice::create_shader_module(device, LitProducer::VbShadeFroxel.spirv(self.env_armed))
             .expect("invariant: VB shade FROXEL compute shader module create");
         let vb_shade_froxel_pipeline = ctx
             .create_compute_pipeline_vb(
@@ -5965,7 +6093,7 @@ impl GpuSceneBundles {
 
         // `vb_shade_tex_froxel` — the SAME 4-set shape `build_vb_shade_textured_pipeline` uses,
         // against the wider `vb_layout0_froxel`.
-        let vb_shade_tex_froxel_cs = RhiDevice::create_shader_module(device, vb_shade_tex_froxel_spirv())
+        let vb_shade_tex_froxel_cs = RhiDevice::create_shader_module(device, LitProducer::VbShadeTexFroxel.spirv(self.env_armed))
             .expect("invariant: VB shade TEXTURED+FROXEL compute shader module create");
         let vb_shade_tex_froxel_pipeline = ctx
             .create_compute_pipeline_vb_textured(
@@ -6809,7 +6937,7 @@ impl GpuSceneBundles {
                 self.shadow_denoise_pipelines.as_ref().zip(self.shadow_atrous_pipeline.as_ref())
             })
             .flatten()
-            .map(|((vis_pipeline, denoised_pipeline, resolve_layout), (atrous_pipeline, atrous_pipeline_thin, atrous_layout))| {
+            .map(|((vis_pipeline, denoised_pipeline, resolve_layout, _), (atrous_pipeline, atrous_pipeline_thin, atrous_layout))| {
                 ShadowVisActivation {
                     vis_pipeline,
                     denoised_pipeline,
@@ -6938,6 +7066,8 @@ impl GpuSceneBundles {
                 &self.resolve_pipeline
             },
             resolve_layout: &self.resolve_layout,
+            // IBL1 R1: armed ⇒ every lit-producer set binds the environment at its first free index.
+            env_map: self.env_gpu.as_ref().map(|e| EnvMapBinding { texture: &e.texture, sampler: &e.sampler }),
             // R2a-4b: the HWRT resolve pipeline+layout+per-FIF TLAS triple — `Some` only when the
             // boot built the HWRT resources (RT device + hwrt) AND the TLAS ring exists. All three
             // are `Some`/`None` in lock-step, so the record-site picks a consistent triple. `None`
@@ -7209,7 +7339,13 @@ impl GpuSceneBundles {
             resolve_layout_denoise_hwrt: self
                 .shadow_denoise_pipelines
                 .as_ref()
-                .map(|(_, _, layout)| layout),
+                .map(|(_, _, layout, _)| layout),
+            // IBL1 R1: the armed boot's 24-entry DENOISED-REFL layout (`None` unarmed / non-RT).
+            #[cfg(feature = "hwrt")]
+            resolve_layout_denoised_refl_hwrt: self
+                .shadow_denoise_pipelines
+                .as_ref()
+                .and_then(|(_, _, _, refl)| refl.as_ref()),
             #[cfg(feature = "hwrt")]
             atrous_layout_denoise_hwrt: self
                 .shadow_atrous_pipeline
@@ -8082,6 +8218,12 @@ impl GpuSceneBundles {
             // with `resolve_pipeline` — both pipelines are destroyed before their shared layout.
             RhiDevice::destroy_compute_pipeline(ctx, self.resolve_pipeline_wrap);
             RhiDevice::destroy_bind_group_layout(ctx, self.resolve_layout);
+            // IBL1 R1: the armed boot's environment chain + sampler (no set references them past
+            // the device-idle point this teardown runs at).
+            if let Some(env) = self.env_gpu {
+                RhiDevice::destroy_sampler(ctx, env.sampler);
+                RhiDevice::destroy_texture(ctx, env.texture);
+            }
             // TAA W5 (C3 fix): the taa_resolve compute pipeline + its 8-binding layout, both built
             // UNCONDITIONALLY at boot (every config incl. AaMode::Off), like fxaa/smaa/ssaa. Pipeline
             // before its layout — else a per-renderer boot leaks a pipeline + layout + sampler.
@@ -8308,10 +8450,13 @@ impl GpuSceneBundles {
             // and the à-trous filter pipeline + its 6-binding layout. `Option`-guarded (present only
             // on an RT device). Pipelines before their layout.
             #[cfg(feature = "hwrt")]
-            if let Some((vis, denoised, layout)) = self.shadow_denoise_pipelines {
+            if let Some((vis, denoised, layout, refl_layout)) = self.shadow_denoise_pipelines {
                 RhiDevice::destroy_compute_pipeline(ctx, vis);
                 RhiDevice::destroy_compute_pipeline(ctx, denoised);
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
+                if let Some(l) = refl_layout {
+                    RhiDevice::destroy_bind_group_layout(ctx, l);
+                }
             }
             #[cfg(feature = "hwrt")]
             if let Some((pipeline, pipeline_thin, layout)) = self.shadow_atrous_pipeline {

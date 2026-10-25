@@ -10,10 +10,18 @@
 //! - exactly one `#include "env_ibl.hlsli"`, inside `#ifdef REFL`;
 //! - the `gEnvMap` / `gEnvSamp` declarations inside `#ifdef REFL`.
 //!
-//! and over the manifest: exactly 20 REFL rows (`_refl.` modules), each with a committed `.spv`.
-//! Comments are stripped before counting, so a doc line naming a call is not a call.
+//! and over the manifest: exactly 20 REFL rows (`_refl.` modules), each with a committed `.spv` and
+//! each embedded by exactly one `embed_spirv!` in `src/compute/refl.rs` (C11). The binding numbers
+//! the sources spell are the host's (`present::targets`' `ENV_BINDING_*`, which the set builders
+//! and layouts use). Comments are stripped before counting, so a doc line naming a call is not a
+//! call.
 
 use std::path::PathBuf;
+
+use boyko_rhi_vulkan::present::{
+    ENV_BINDING_FORWARD_SET1, ENV_BINDING_RESOLVE_DENOISED, ENV_BINDING_RESOLVE_HWRT, ENV_BINDING_RESOLVE_SOFTWARE,
+    ENV_BINDING_VB_SPLIT_SET1,
+};
 
 /// The six `lit`-writing producer sources.
 const PRODUCERS: [&str; 6] = [
@@ -120,6 +128,65 @@ fn manifest_lists_the_twenty_refl_rows() {
     for r in &rows {
         assert!(shaders_dir().join(r).exists(), "manifest row {r} has no committed .spv");
     }
+}
+
+/// The binding each source declares for `gEnvMap` / `gEnvSamp` is the host constant its set builder
+/// writes (an armed boot whose shader and set disagree would read an unbound or wrong descriptor),
+/// and every manifest REFL row is embedded exactly once by `src/compute/refl.rs`.
+#[test]
+fn env_bindings_and_embeds_match_the_host() {
+    let read = |name: &str| -> String {
+        std::fs::read_to_string(shaders_dir().join(name)).unwrap_or_else(|e| panic!("{name}: {e}")).replace("\r\n", "\n")
+    };
+    let mut problems = Vec::new();
+    let deferred = read("deferred_pbr.hlsl");
+    for (cond, binding) in [
+        ("#if HWRT && SHADOW_STAGE == SHADOW_STAGE_RESOLVE_DENOISED\n", ENV_BINDING_RESOLVE_DENOISED),
+        ("#elif HWRT\n", ENV_BINDING_RESOLVE_HWRT),
+        ("#else\n", ENV_BINDING_RESOLVE_SOFTWARE),
+    ] {
+        let want = format!("{cond}#define ENV_MAP_BINDING {binding}\n");
+        if deferred.matches(&want).count() != 1 {
+            problems.push(format!("deferred_pbr.hlsl: no single `{}` (the host constant)", want.replace('\n', " / ")));
+        }
+    }
+    for (name, binding) in [
+        ("forward_opaque.fs.hlsl", ENV_BINDING_FORWARD_SET1),
+        ("sdf_forward_march.comp.hlsl", ENV_BINDING_FORWARD_SET1),
+        ("vb_resolve.comp.hlsl", ENV_BINDING_FORWARD_SET1),
+        ("vb_shade.comp.hlsl", ENV_BINDING_FORWARD_SET1),
+        ("vb_shade_split.comp.hlsl", ENV_BINDING_VB_SPLIT_SET1),
+    ] {
+        let text = read(name);
+        for decl in [
+            format!("[[vk::binding({binding}, 1)]] Texture2D<float4> gEnvMap;"),
+            format!("[[vk::binding({binding}, 1)]] SamplerState gEnvSamp;"),
+        ] {
+            if text.matches(&decl).count() != 1 {
+                problems.push(format!("{name}: no single `{decl}` (the host constant)"));
+            }
+        }
+    }
+    let refl_rs = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/compute/refl.rs"))
+        .expect("invariant: src/compute/refl.rs is readable");
+    let embeds: Vec<&str> = refl_rs
+        .lines()
+        .filter_map(|l| l.split("\"/shaders/").nth(1))
+        .filter_map(|rest| rest.split('"').next())
+        .filter(|f| f.contains("_refl."))
+        .collect();
+    if embeds.len() != 20 {
+        problems.push(format!("src/compute/refl.rs embeds {} REFL modules (want 20): {embeds:?}", embeds.len()));
+    }
+    for (i, e) in embeds.iter().enumerate() {
+        if embeds[i + 1..].contains(e) {
+            problems.push(format!("{e} is embedded twice"));
+        }
+        if !shaders_dir().join(e).exists() {
+            problems.push(format!("{e} is embedded but not committed"));
+        }
+    }
+    assert!(problems.is_empty(), "the REFL bindings / embeds disagree with the host:\n{}", problems.join("\n"));
 }
 
 /// The census can fail: a fixture with the arm outside `#ifdef REFL` and one with it missing.
