@@ -44,7 +44,13 @@
 //! | `BOYKO_PBR_TEXTURE_DIR` | texture folder (see above) | `crates/boyko_app/assets/pbr_test/` |
 //! | `BOYKO_SUN` | directional-light intensity | `5.5` |
 //! | `BOYKO_JITTER=jx,jy` | sub-pixel camera pan, in pixels (rotated-grid supersampling) | `0,0` |
-//! | `BOYKO_TONEMAP` | resolve tonemapper (`neutral` \| `reinhard` \| else ACES) | ACES |
+//! | `BOYKO_STAGE` | the stage preset: `studio` (dark floor 0.05, the ground term DERIVED from the floor incl. its specular sheen — [`studio_ground`]) \| `daylight` (the pre-IBL1 stage: floor 0.4, sky (1.05, 0.98, 0.88), ground (0.55, 0.52, 0.48)) | `studio` |
+//! | `BOYKO_FLOOR=r,g,b` | overrides the preset's floor albedo (LINEAR) | the preset's |
+//! | `BOYKO_SKY=r,g,b` / `BOYKO_GROUND=r,g,b` | override the preset's `SkyLight` lanes (LINEAR) | the preset's |
+//! | `BOYKO_SLICES` | the sphere's longitude segments (latitude bands = 3/4 of it; verify F1's tessellation knob) | `64` |
+//! | `BOYKO_IBL` | the environment: `studio` (the procedural studio, IBL1 — `EnvironmentConfig { Studio }` + an `EnvironmentLight`, no `SkyLight`) \| `off` (the stage's `SkyLight`) | `studio` |
+//! | `BOYKO_IBL_INTENSITY` / `BOYKO_IBL_YAW` | the `EnvironmentLight`'s intensity and yaw (degrees) | `1.0` / `0` |
+//! | `BOYKO_TONEMAP` | the tonemapper: `aces` \| `agx` \| `neutral` \| `reinhard`; unset ⇒ the ENGINE default (Khronos PBR Neutral since render wave PXt) | engine default |
 //! | `BOYKO_WRAP` | diffuse terminator softening, `[0,1]` | `0.0` |
 //! | `BOYKO_WIN` | window width/height in pixels (square) | `1280` |
 //! | `BOYKO_CSM=off` | disables the CSM shadow-cascade insert | enabled (3 cascades) |
@@ -70,6 +76,7 @@ use boyko_render::{
     AaConfig, AaMode, BindlessTextureTable, LightingConfig, Material, MaterialGpu, SsaoConfig,
     SsaoQuality, TextureGpu, Tonemapper, load_material_folder,
 };
+use boyko_render::environment::{EnvSource, EnvironmentConfig, EnvironmentLight};
 
 use common::{floor_plane, uv_sphere};
 
@@ -96,8 +103,15 @@ struct EvalKnobs {
     sun_intensity: f32,
     /// `BOYKO_JITTER=jx,jy` — the sub-pixel camera pan, in pixels (default `(0.0, 0.0)`).
     jitter: (f32, f32),
-    /// `BOYKO_TONEMAP` — the resolve tonemapper (`neutral` | `reinhard` | else ACES).
-    tonemapper: Tonemapper,
+    /// `BOYKO_TONEMAP` — an explicit tonemapper, or `None` (unset / unknown) for the engine default.
+    tonemapper: Option<Tonemapper>,
+    /// `BOYKO_STAGE` + `BOYKO_FLOOR` / `BOYKO_SKY` / `BOYKO_GROUND` — the resolved stage.
+    stage: Stage,
+    /// `BOYKO_SLICES` — the sphere's longitude segments (default `64`).
+    slices: u32,
+    /// `BOYKO_IBL` — `Some((intensity, yaw_radians))` arms the procedural studio environment
+    /// (the default), `None` (`off`) keeps the stage's `SkyLight`.
+    ibl: Option<(f32, f32)>,
     /// `BOYKO_WRAP` — the diffuse terminator softening, `[0, 1]` (default `0.0`).
     terminator_softening: f32,
     /// `BOYKO_WIN` — the window width/height in pixels (default `1280`).
@@ -137,9 +151,22 @@ impl EvalKnobs {
             })
             .unwrap_or((0.0, 0.0));
         let tonemapper = match std::env::var("BOYKO_TONEMAP").ok().as_deref() {
-            Some("neutral") => Tonemapper::Neutral,
-            Some("reinhard") => Tonemapper::ReinhardJodie,
-            _ => Tonemapper::Aces,
+            Some("aces") => Some(Tonemapper::Aces),
+            Some("agx") => Some(Tonemapper::AgX),
+            Some("neutral") => Some(Tonemapper::Neutral),
+            Some("reinhard") => Some(Tonemapper::ReinhardJodie),
+            _ => None,
+        };
+        let stage = Stage::from_env(sun_intensity);
+        let slices = std::env::var("BOYKO_SLICES").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(64).max(8);
+        let ibl = match std::env::var("BOYKO_IBL").ok().as_deref() {
+            Some("off") => None,
+            _ => {
+                let intensity =
+                    std::env::var("BOYKO_IBL_INTENSITY").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0);
+                let yaw_deg = std::env::var("BOYKO_IBL_YAW").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
+                Some((intensity, yaw_deg.to_radians()))
+            }
         };
         let terminator_softening =
             std::env::var("BOYKO_WRAP").ok().and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0);
@@ -162,6 +189,9 @@ impl EvalKnobs {
             sun_intensity,
             jitter,
             tonemapper,
+            stage,
+            slices,
+            ibl,
             terminator_softening,
             win,
             csm_off,
@@ -182,17 +212,19 @@ fn setup(
     let knobs = EvalKnobs::from_env();
     println!("pbr_test: reading textures from {}", knobs.texture_dir.display());
 
-    // ── The environment: a large matte non-textured floor (the default material).
-    let (fv, fi) = floor_plane(40.0, [0.4, 0.4, 0.42, 1.0]);
+    // ── The stage: a large matte non-textured floor at the preset's albedo (studio 0.05 by
+    //    default — verify F1: a light floor reflected into a metal reads as ceramic).
+    let f = knobs.stage.floor;
+    let (fv, fi) = floor_plane(40.0, [f[0], f[1], f[2], 1.0]);
     let floor_mesh = meshes.register_mesh(dev.get(), &fv, &fi);
-    let floor_mat = materials.add(Material::new([0.4, 0.4, 0.42, 1.0], 0.0, 0.6, 0.5, [0.0; 3], 0));
+    let floor_mat = materials.add(Material::new([f[0], f[1], f[2], 1.0], 0.0, FLOOR_ROUGHNESS, 0.5, [0.0; 3], 0));
     let floor = commands
         .spawn(MeshBundle::new(floor_mesh, Transform::from_translation(Vec3::new(0.0, 0.0, 0.0))))
         .id();
     commands.entity(floor).insert(MaterialHandle::from_handle(floor_mat));
 
     // ── The textured sphere: one high-res mesh with a generated tangent basis.
-    let (sv, si) = uv_sphere(1.0, 48, 64, [1.0, 1.0, 1.0, 1.0]);
+    let (sv, si) = uv_sphere(1.0, knobs.slices * 3 / 4, knobs.slices, [1.0, 1.0, 1.0, 1.0]);
     let sphere = meshes.register_mesh(dev.get(), &sv, &si);
 
     // ── Load whichever texture slots the owner's folder provides (each independent,
@@ -239,14 +271,24 @@ fn setup(
         global: GlobalTransform::IDENTITY,
         // DIAGNOSTIC: `BOYKO_SUN` overrides the sun intensity (default 5.5) — probes the
         // direct:ambient contrast ratio's role in the harsh bump-terminator islands.
-        light: DirectionalLight::new(SUN_DIR, [1.0, 0.96, 0.88], knobs.sun_intensity),
+        light: DirectionalLight::new(SUN_DIR, SUN_COLOR, knobs.sun_intensity),
     });
 
-    // ── Warm-neutral sky: a MODERATE ambient fill (enough to keep shadowed/downward-
-    //    facing areas from crushing to black, but dim enough that the strong key still
-    //    yields deep relief) over a dark-warm ground. NOT blue (a blue sky reflected off
-    //    gold cancels its yellow tint → pale metal). Balances the Bevy-like key:ambient.
-    commands.spawn(SkyLight::new([1.05, 0.98, 0.88], [0.55, 0.52, 0.48]));
+    // ── The ambient: by default (`BOYKO_IBL` unset) the procedural studio environment (IBL1 —
+    //    the metal mirrors a room of emissive panels; the runner arms `EnvironmentConfig`, the
+    //    app inserts it below) and NO `SkyLight` (the environment row is the one sky row). With
+    //    `BOYKO_IBL=off`, the stage's `SkyLight`: a warm-neutral sky — NOT blue (a blue sky
+    //    reflected off gold cancels its yellow tint → pale metal) — over the preset's ground,
+    //    which on the studio stage is DERIVED from the dark floor ([`studio_ground`]), so the
+    //    metal's lower half mirrors the floor it stands on.
+    match knobs.ibl {
+        Some((intensity, yaw)) => {
+            commands.spawn(EnvironmentLight::new(intensity, yaw));
+        }
+        None => {
+            commands.spawn(SkyLight::new(knobs.stage.sky, knobs.stage.ground));
+        }
+    }
 
     // ── The camera: close on the sphere so any texture detail is clearly legible.
     // DIAGNOSTIC: `BOYKO_JITTER=jx,jy` pans the view by a sub-pixel amount (in pixels)
@@ -281,13 +323,16 @@ fn setup(
 }
 
 /// Startup system: applies the owner-eval lighting knobs onto the plugin-inserted
-/// [`LightingConfig`] — the resolve tonemapper (`BOYKO_TONEMAP`: `neutral` →
-/// Khronos PBR Neutral, `reinhard` → Reinhard-Jodie, anything else → ACES) AND the
-/// diffuse terminator softening (`BOYKO_WRAP`, a float in `[0,1]`, default `0`).
+/// [`LightingConfig`] — an explicit tonemapper (`BOYKO_TONEMAP`: `aces` / `agx` / `neutral` /
+/// `reinhard`; unset keeps the engine default) AND the diffuse terminator softening
+/// (`BOYKO_WRAP`, a float in `[0,1]`, default `0`).
 /// Leaves every other field (exposure / sky / gates) at its default.
 fn apply_eval_lighting_knobs(mut cfg: ResMut<LightingConfig>) {
     let knobs = EvalKnobs::from_env();
-    cfg.tonemapper = knobs.tonemapper;
+    // Unset ⇒ the engine default curve stays (Neutral since render wave PXt, ruling 116).
+    if let Some(t) = knobs.tonemapper {
+        cfg.tonemapper = t;
+    }
     cfg.terminator_softening = knobs.terminator_softening;
 }
 
@@ -335,5 +380,120 @@ fn pbr_material_showcase_screenshot_dump() {
     if knobs.ssao_quality != SsaoQuality::Off {
         app.insert_resource(SsaoConfig { quality: knobs.ssao_quality, ..Default::default() });
     }
+    // IBL1 R1 (ruling 121 Q2): the showcase arms the procedural studio by default; the boot reads
+    // this once (boot-frozen), so it is inserted before `run` — AFTER `add_plugins`, overwriting
+    // `EnvironmentPlugin`'s `Off` (the `CsmConfig` precedent above).
+    if knobs.ibl.is_some() {
+        app.insert_resource(EnvironmentConfig { source: EnvSource::Studio });
+    }
     app.run();
+}
+
+// ===============================================================================================
+// The stage (IBL1 P3, ruling 118; verify F1, M6)
+// ===============================================================================================
+
+/// The floor's perceptual roughness (both presets).
+const FLOOR_ROUGHNESS: f32 = 0.6;
+/// The studio preset's floor albedo (verify F1: ~0.05).
+const STUDIO_FLOOR: [f32; 3] = [0.05, 0.05, 0.05];
+/// The warm sky tint both presets keep (July's reason: not blue, so the gold keeps its yellow).
+const WARM_SKY: [f32; 3] = [1.05, 0.98, 0.88];
+/// The daylight preset (the pre-IBL1 stage, kept as a knob): floor, sky, ground.
+const DAYLIGHT: ([f32; 3], [f32; 3], [f32; 3]) = ([0.4, 0.4, 0.42], WARM_SKY, [0.55, 0.52, 0.48]);
+/// The sun's colour (the `DirectionalLight` this scene spawns).
+const SUN_COLOR: [f32; 3] = [1.0, 0.96, 0.88];
+
+/// The resolved stage: floor albedo and the `SkyLight` lanes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Stage {
+    floor: [f32; 3],
+    sky: [f32; 3],
+    ground: [f32; 3],
+}
+
+/// `r,g,b` → three floats.
+fn parse_rgb(v: &str) -> Option<[f32; 3]> {
+    let mut it = v.split(',').map(|c| c.trim().parse::<f32>());
+    let rgb = [it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?];
+    it.next().is_none().then_some(rgb)
+}
+
+impl Stage {
+    /// `BOYKO_STAGE` (default `studio`) with the `BOYKO_FLOOR` / `BOYKO_SKY` / `BOYKO_GROUND`
+    /// overrides. The studio ground is derived from the (possibly overridden) floor and sky.
+    fn from_env(sun_intensity: f32) -> Self {
+        let rgb = |var: &str| std::env::var(var).ok().as_deref().and_then(parse_rgb);
+        let daylight = std::env::var("BOYKO_STAGE").ok().as_deref() == Some("daylight");
+        let (floor, sky) = if daylight { (DAYLIGHT.0, DAYLIGHT.1) } else { (STUDIO_FLOOR, WARM_SKY) };
+        let floor = rgb("BOYKO_FLOOR").unwrap_or(floor);
+        let sky = rgb("BOYKO_SKY").unwrap_or(sky);
+        let derived = if daylight { DAYLIGHT.2 } else { studio_ground(floor, sky, sun_intensity, sun_up()) };
+        let ground = rgb("BOYKO_GROUND").unwrap_or(derived);
+        Stage { floor, sky, ground }
+    }
+}
+
+/// The sun's up component (`SUN_DIR` normalized, `.y` ≈ 0.398).
+fn sun_up() -> f32 {
+    let [x, y, z] = SUN_DIR;
+    y / (x * x + y * y + z * z).sqrt()
+}
+
+/// Karis' analytic environment BRDF (no DFG LUT) — the `(scale, bias)` of the split sum,
+/// transcribed from `crates/boyko_rhi_vulkan/shaders/deferred_pbr.hlsl`'s `env_brdf_approx`
+/// (OPEN-ITEMS proposal PC-8(c): retired with the DFG LUT, like its six shader copies).
+fn env_brdf_approx(roughness: f32, nov: f32) -> [f32; 2] {
+    let c0 = [-1.0, -0.0275, -0.572, 0.022];
+    let c1 = [1.0, 0.0425, 1.04, -0.04];
+    let r: [f32; 4] = core::array::from_fn(|i| roughness * c0[i] + c1[i]);
+    let a004 = (r[0] * r[0]).min((-9.28 * nov).exp2()) * r[0] + r[1];
+    [-1.04 * a004 + r[2], 1.04 * a004 + r[3]]
+}
+
+/// The studio stage's `SkyLight` ground lane, DERIVED from the floor (verify M6's correction): the
+/// radiance an up-facing hemisphere sees from a floor of albedo `floor` lit by the sky and the sun —
+/// INCLUDING the floor's own ambient specular sheen, which reflects the ground term itself, so the
+/// lane is the fixed point
+///
+/// `g = (ρ·sky + ρ·E·sun_y/π·sun_color + s·ec·w·sky) / (1 − s·ec·(1 − w))`
+///
+/// with `s = f0·A + B` the floor's split-sum scale at `(roughness 0.6, NoV 0.3)` (`f0` 0.04,
+/// reflectance 0.5), `ec` its energy compensation, and `w = smoothstep(0.65)` the engine's
+/// reflected-hemisphere weight at `R.y = 0.3`. The sun's direct specular on the floor is
+/// view-dependent and omitted. For ρ = 0.05 under the showcase sun this is ≈ 0.15 × the sky tint
+/// (the diffuse-only derivation gave 0.088 — the floor's sheen is half the lane).
+fn studio_ground(floor: [f32; 3], sky: [f32; 3], sun_intensity: f32, sun_y: f32) -> [f32; 3] {
+    let f0 = 0.04;
+    let [a, b] = env_brdf_approx(FLOOR_ROUGHNESS, 0.3);
+    let s = f0 * a + b;
+    let ec = 1.0 + f0 * (1.0 / (a + b).max(1e-4) - 1.0);
+    let t = 0.65f32;
+    let w = t * t * (3.0 - 2.0 * t);
+    core::array::from_fn(|c| {
+        let diffuse = floor[c] * sky[c] + floor[c] * sun_intensity * SUN_COLOR[c] * sun_y / core::f32::consts::PI;
+        (diffuse + s * ec * w * sky[c]) / (1.0 - s * ec * (1.0 - w))
+    })
+}
+
+/// IBL1 P3 (C13): the derived ground's closed form — at ρ = 0 the lane is the sheen's fixed point
+/// alone, and at the studio's ρ = 0.05 under the showcase sun every channel lands in verify M6's
+/// 0.13–0.18 × the sky tint. Dropping the sheen term gives 0.083 × (verify M6's 0.087 class): red.
+#[test]
+fn studio_ground_closed_form() {
+    let [a, b] = env_brdf_approx(FLOOR_ROUGHNESS, 0.3);
+    let s = 0.04 * a + b;
+    let ec = 1.0 + 0.04 * (1.0 / (a + b) - 1.0);
+    let w = 0.65f32 * 0.65 * (3.0 - 2.0 * 0.65);
+    let g0 = studio_ground([0.0; 3], WARM_SKY, 5.5, sun_up());
+    for c in 0..3 {
+        let want = s * ec * w * WARM_SKY[c] / (1.0 - s * ec * (1.0 - w));
+        assert!((g0[c] - want).abs() <= 1e-6, "rho 0, channel {c}: {} vs {want}", g0[c]);
+    }
+    let g = studio_ground(STUDIO_FLOOR, WARM_SKY, 5.5, sun_up());
+    for c in 0..3 {
+        let ratio = g[c] / WARM_SKY[c];
+        assert!((0.13..=0.18).contains(&ratio), "rho 0.05, channel {c}: ground/sky = {ratio} (want 0.13..0.18)");
+    }
+    assert!((sun_up() - 0.398).abs() < 1e-3, "the showcase sun's up component");
 }
