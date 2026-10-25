@@ -27,6 +27,27 @@ use crate::memory::BoundBuffer;
 use crate::pipeline_cache::PipelineKind;
 use crate::texture::{VulkanTexture, VulkanTextureView};
 
+/// `VK_LOD_CLAMP_NONE` — the Vulkan spec's "no upper LOD clamp" value, the `maxLod` of a
+/// sampler that may read every level of its image (the `bindless` shared sampler's
+/// `MAX_LOD_UNCLAMPED` idiom).
+const VK_LOD_CLAMP_NONE: f32 = 1000.0;
+
+/// Lowers the agnostic [`MipMode`] to the Vulkan sampler mip state `(mipmapMode, minLod,
+/// maxLod)` — a pure function so the lowering is host-gated (`sampler_mip_state_lowering`).
+///
+/// - [`MipMode::None`] → `(NEAREST, 0.0, 0.0)`: no mipmapping, every read hits the base level
+///   (the GUI P5b MSDF-atlas requirement — a mipped read corrupts the per-channel median).
+///   Every pre-IBL1 sampler takes this arm, so their create infos are byte-identical.
+/// - [`MipMode::Linear`] → `(LINEAR, 0.0, VK_LOD_CLAMP_NONE)`: the whole chain is reachable,
+///   so an explicit `SampleLevel(k)` reads level `k` (IBL1 RK-1, the environment chain). A
+///   `maxLod` of 0 here would be the silent-wrong class: every level would read level 0.
+pub(crate) const fn sampler_mip_state(mip: MipMode) -> (i32, f32, f32) {
+    match mip {
+        MipMode::None => (VK_SAMPLER_MIPMAP_MODE_NEAREST, 0.0, 0.0),
+        MipMode::Linear => (VK_SAMPLER_MIPMAP_MODE_LINEAR, 0.0, VK_LOD_CLAMP_NONE),
+    }
+}
+
 impl RhiDevice<Vulkan> for VulkanContext {
     type Error = VulkanError;
 
@@ -137,14 +158,9 @@ impl RhiDevice<Vulkan> for VulkanContext {
         // compare are disabled (no `samplerAnisotropy` feature is requested at
         // device creation, so anisotropy MUST be FALSE).
         let address = desc.address_mode.as_i32();
-        // GUI P5b Decision T4-D: map the agnostic `MipMode` to the Vulkan mip state.
-        // `None` pins NEAREST mip mode + `minLod == maxLod == 0.0` (no mipmapping),
-        // so a sampled read always reads the base level — the MSDF-atlas requirement
-        // (a mipped read corrupts the per-channel median). It is the only variant in
-        // P5b; the `match` makes the no-mip guarantee DECLARED, not accidental.
-        let (mipmap_mode, min_lod, max_lod) = match desc.mip {
-            MipMode::None => (VK_SAMPLER_MIPMAP_MODE_NEAREST, 0.0, 0.0),
-        };
+        // GUI P5b Decision T4-D / IBL1 RK-1: the agnostic `MipMode` lowers through the pure
+        // `sampler_mip_state` (its doc carries the per-variant triple and why).
+        let (mipmap_mode, min_lod, max_lod) = sampler_mip_state(desc.mip);
         // CSM Increment 0: lower the optional hardware depth-comparison op. `None`
         // keeps `compareEnable = VK_FALSE` + `compareOp = VK_COMPARE_OP_NEVER` —
         // byte-identical to every existing sampler. `Some(op)` builds a COMPARISON
@@ -2814,5 +2830,26 @@ impl<const STAGES: usize> CreationFeedback<STAGES> {
             pipeline_stage_creation_feedback_count: STAGES as u32,
             p_pipeline_stage_creation_feedbacks: self.stages.as_mut_ptr(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// IBL1 RK-1: `None` keeps the pre-RK-1 triple exactly (every existing sampler's create
+    /// info is byte-identical), and `Linear` reaches the whole environment chain: LINEAR mip
+    /// interpolation from level 0 with a `maxLod` at least the chain's last level (6).
+    #[test]
+    fn sampler_mip_state_lowering() {
+        let (mode, min_lod, max_lod) = sampler_mip_state(MipMode::None);
+        assert_eq!(mode, VK_SAMPLER_MIPMAP_MODE_NEAREST);
+        assert_eq!(min_lod.to_bits(), 0.0f32.to_bits());
+        assert_eq!(max_lod.to_bits(), 0.0f32.to_bits());
+
+        let (mode, min_lod, max_lod) = sampler_mip_state(MipMode::Linear);
+        assert_eq!(mode, VK_SAMPLER_MIPMAP_MODE_LINEAR);
+        assert_eq!(min_lod.to_bits(), 0.0f32.to_bits());
+        assert!(max_lod >= 6.0, "Linear must not clamp the 7-level environment chain (maxLod {max_lod})");
     }
 }

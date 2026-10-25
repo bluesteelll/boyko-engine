@@ -154,11 +154,11 @@ impl VulkanBindlessSet {
 /// texture) + no compare + unclamped mip range.
 ///
 /// Deliberately bypasses [`crate::device::VulkanContext::device_caps`]'s
-/// `create_sampler`/`SamplerDesc` seam: `SamplerDesc` has no anisotropy field and
-/// its `MipMode` has no trilinear variant today (every other sampler caller is
-/// single-mip nearest/bilinear), and widening that public, ~20-call-site struct
-/// is out of this rung's scope — this is a dedicated, additive, raw-FFI
-/// construction local to the bindless path.
+/// `create_sampler`/`SamplerDesc` seam: `SamplerDesc` has no anisotropy field (its
+/// `MipMode::Linear`, added by IBL1 RK-1 for the environment chain, is trilinear but
+/// never anisotropic), and widening that public, ~20-call-site struct is out of this
+/// rung's scope — this is a dedicated, additive, raw-FFI construction local to the
+/// bindless path.
 fn create_shared_sampler(ctx: &VulkanContext) -> Result<VkSampler, VulkanError> {
     // The Vulkan 1.2 core "Required Limits" table guarantees `maxSamplerAnisotropy
     // >= 16.0` for any device with the `samplerAnisotropy` feature enabled (T-dev

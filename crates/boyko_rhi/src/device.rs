@@ -234,21 +234,27 @@ impl Default for TextureViewDesc {
     }
 }
 
-/// The mip/LOD sampling mode (GUI P5b Decision T4-D).
+/// The mip/LOD sampling mode (GUI P5b Decision T4-D; IBL1 RK-1 adds [`Self::Linear`]).
 ///
-/// `#[repr(i32)]` so the backend reads it as a small POD discriminant. P5b uses
-/// [`Self::None`] exclusively: the MSDF atlas is upload-once at a single rasterized
-/// `pixels_per_em` and the `screenPxRange` AA derivation assumes the base level is
-/// sampled (a mipped read would corrupt the per-channel `median()`). Making the
-/// no-mip intent a DECLARED, gate-backed field (rather than a backend-default
-/// accident) is the Decision-T4-D fix; the variant set grows when a future texture
-/// path needs mipmaps.
+/// `#[repr(i32)]` so the backend reads it as a small POD discriminant. The MSDF atlas
+/// (GUI P5b) and every other single-level sampler use [`Self::None`]: the atlas is
+/// upload-once at a single rasterized `pixels_per_em` and the `screenPxRange` AA
+/// derivation assumes the base level is sampled (a mipped read would corrupt the
+/// per-channel `median()`). Making the no-mip intent a DECLARED, gate-backed field
+/// (rather than a backend-default accident) is the Decision-T4-D fix. The prefiltered
+/// environment chain (IBL1 R1) is the first mipped sampler: its shader picks each level
+/// explicitly with `SampleLevel`, which `None`'s `maxLod = 0` clamp would silently pin
+/// to the base level.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MipMode {
     /// No mipmapping: the backend pins `mipmapMode = NEAREST`, `minLod = maxLod =
     /// 0.0`, so every sample reads the base level. The P5b MSDF-atlas requirement.
     None = 0,
+    /// Linear mip interpolation over the WHOLE chain: the backend lowers it to
+    /// `mipmapMode = LINEAR`, `minLod = 0.0`, `maxLod = VK_LOD_CLAMP_NONE` (1000.0), so an
+    /// explicit `SampleLevel(k)` reads level `k` of a mipped image (IBL1 RK-1).
+    Linear = 1,
 }
 
 /// Parameters for [`RhiDevice::create_sampler`] (Phase-6 S0 rung 5).
@@ -270,7 +276,8 @@ pub struct SamplerDesc {
     pub min_filter: Filter,
     /// The address mode applied to every texture-coordinate axis.
     pub address_mode: AddressMode,
-    /// The mip/LOD mode (GUI P5b Decision T4-D). P5b uses [`MipMode::None`].
+    /// The mip/LOD mode (GUI P5b Decision T4-D). P5b uses [`MipMode::None`]; the IBL
+    /// environment chain uses [`MipMode::Linear`].
     pub mip: MipMode,
     /// The optional hardware depth-comparison op (CSM Increment 0). `None` (the
     /// default) leaves `compareEnable = VK_FALSE` — byte-identical to every existing
