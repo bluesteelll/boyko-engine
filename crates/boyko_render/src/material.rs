@@ -3,7 +3,7 @@
 //! The deferred Cook-Torrance resolve (`deferred_pbr.hlsl`) and the SDF marcher
 //! (`sdf_gbuffer_composite.hlsl`) index a GPU-resident `MaterialGpu[]` table by a
 //! 16-bit material id (carried per-edit in the `SdfEdit.center.w` free lane, and per
-//! G-buffer pixel in `gNormal.BA`). The marcher fetches `base_color`; the resolve
+//! G-buffer pixel in the `gAlbedo.A` / `gMaterial.A` lanes, IBL1 P1). The marcher fetches `base_color`; the resolve
 //! fetches the full metallic-roughness parameter set and runs the BRDF.
 //!
 //! # Layout discipline (the std430 mirror)
@@ -420,7 +420,7 @@ impl HasLoaders for Material {
     const LOADERS: &'static [LoaderEntry<Self>] = &[LoaderEntry::of::<RonMaterialLoader>()];
 }
 
-/// A material-table index handed to the G-buffer. 16-bit range (the `gNormal.BA` pack +
+/// A material-table index handed to the G-buffer. 16-bit range (the G-buffer's two id lanes, `gAlbedo.A` / `gMaterial.A` +
 /// the `SdfEdit.center.w` carrier); 65 536 materials. `0` is the engine default material.
 ///
 /// SEALED (asset-system rung A1): the field is private. A live, table-resolvable id is

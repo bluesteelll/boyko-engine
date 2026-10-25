@@ -1,10 +1,11 @@
 //! The G-buffer MATERIAL-ID PACKER leaf (Track B Increment G1: the FIRST `float2`-returning leaf —
 //! it lands the minimal `float2` axis + the bitwise `uint` `&`/`>>`).
 //!
-//! `pack_material_id_ba` (`sdf_gbuffer_composite.hlsl:519`) packs a 16-bit `uint id` into the B + A
-//! channels of an RGBA8 G-buffer texel: the LOW byte (`id & 255u`) → B, the HIGH byte (`id >> 8u &
-//! 255u`) → A, each as a normalized `[0,1]` UNORM (`byte / 255.0`). The resolve reconstructs `id =
-//! round(b*255) | (round(a*255) << 8)`. This module authors the BODY ONCE over the control-flow axis
+//! `pack_material_id_ba` (`sdf_gbuffer_composite.hlsl`) packs a 16-bit `uint id` into two UNORM8
+//! lanes: the LOW byte (`id & 255u`) → `.x`, the HIGH byte (`id >> 8u & 255u`) → `.y`, each as a
+//! normalized `[0,1]` UNORM (`byte / 255.0`). The producers store `.x` in `gAlbedo.A` and `.y` in
+//! `gMaterial.A` (IBL1 P1; the B + A lanes of the RGBA8 `gNormal` before — the name keeps that
+//! history), and the resolve reconstructs `id = round(albedo.a*255) | (round(material.a*255) << 8)`. This module authors the BODY ONCE over the control-flow axis
 //! `C: Cf`, between the `// === GENERATED pack_material_id_ba BEGIN/END ===` sentinels INSIDE
 //! `pack_material_id_ba`; the hand-written signature `float2 pack_material_id_ba(uint id) {` + the
 //! closing `}` stay un-generated (framing (b)).

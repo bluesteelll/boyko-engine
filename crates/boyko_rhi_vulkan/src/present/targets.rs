@@ -106,19 +106,21 @@ pub struct GBufferTargets {
     /// `in_flight` fence already frees a slot's previous image before reuse; slot `i`'s
     /// vocab/resolve/ssao set @i binds `[i]`). A static scene fills every slot identically.
     pub(crate) depth: [VulkanTexture; FRAMES_IN_FLIGHT],
-    /// The ALBEDO storage image RING (R8G8B8A8): the marcher's FINAL composite sink; also
+    /// The ALBEDO storage image RING (R8G8B8A8, [`GBUFFER_MRT_COLOR_FORMATS`]`[0]`): the raw
+    /// linear base in RGB and, since IBL1 P1, the 16-bit material id's LOW byte in A. Also
     /// sampled by the present-blit (pass C). Render P5-r0: it additionally carries
     /// `COLOR_ATTACHMENT` usage — the mesh raster pass A writes it as MRT@0. RINGED (see
     /// [`Self::depth`]).
     pub(crate) albedo: [VulkanTexture; FRAMES_IN_FLIGHT],
-    /// The NORMAL storage image RING (R8G8B8A8): the PBR MVP-2 marcher's `(oct.x, oct.y,
-    /// matid_lo, matid_hi)` attribute — the octahedral world normal in RG + the 16-bit
-    /// material id in BA. NOW READ by the deferred resolve (STORAGE, GENERAL). RINGED (see
-    /// [`Self::depth`]).
+    /// The NORMAL storage image RING ([`GNORMAL_FORMAT`], `R16G16_UNORM` since IBL1 P1): the
+    /// octahedral world normal, 16 bits per channel (verify M1: the RGBA8 oct8 it replaced
+    /// stepped every polished highlight). The material id moved to the albedo / material alpha
+    /// lanes. Read by the deferred resolve, the Deferred SSAO and the hwrt à-trous (STORAGE,
+    /// GENERAL). RINGED (see [`Self::depth`]).
     pub(crate) normal: [VulkanTexture; FRAMES_IN_FLIGHT],
     /// The MATERIAL storage image RING (R8G8B8A8): the PBR MVP-2 marcher's `(shadow, ao,
-    /// mask)` attribute, consumed by the deferred resolve (STORAGE, GENERAL — never sampled).
-    /// RINGED (see [`Self::depth`]).
+    /// mask)` attribute plus, since IBL1 P1, the 16-bit material id's HIGH byte in A; consumed
+    /// by the deferred resolve (STORAGE, GENERAL — never sampled). RINGED (see [`Self::depth`]).
     pub(crate) material: [VulkanTexture; FRAMES_IN_FLIGHT],
     /// The LIT storage image RING ([`LIT_FORMAT`], RGBA16F since render wave PX1a): the HDR scene
     /// colour — every producer's pre-exposed SCENE-LINEAR radiance (the deferred resolve's STORAGE
@@ -373,6 +375,9 @@ pub struct GBufferTargets {
     /// mirroring [`Self::shadow_atrous_sets`] but binding `thin_normal[fi]` at the `gNormal` slot
     /// and the SPLIT's own `viewt[fi]` (reusing the SAME [`GBufferScene::atrous_layout_denoise_hwrt`]
     /// layout object the deferred chain shares — a stable, per-path-agnostic bind-group shape).
+    /// IBL1 P1: `thin_normal` is RGBA8 while the Deferred `gNormal` is RG16, so these sets are
+    /// dispatched through `ShadowVisActivation::atrous_pipeline_thin` (`shadow_atrous_vb.comp`,
+    /// whose @2 declares `gThinNormal`), never the Deferred module.
     /// `Some` iff the split armed AND the deferred boot à-trous pipeline/layout + the
     /// `shadow_vis`/`shadow_vis2` rings exist.
     #[cfg(feature = "hwrt")]
@@ -2279,11 +2284,39 @@ impl TargetsProfile {
     }
 }
 
-/// The G-buffer color format (albedo / normal / material): `R8G8B8A8_UNORM`, the
-/// STORAGE-image store target the marcher writes (matches the P1b offscreen driver's
-/// `GBUFFER_FORMAT`). The ALBEDO image is also `SAMPLED` (the present-blit) — never
-/// stretched; presented 1:1 in the swapchain's top-left like [`SampledComposite`].
+/// The G-buffer color format of the albedo / material images (and the RGBA8 targets that share
+/// it): `R8G8B8A8_UNORM`, the STORAGE-image store target the marcher writes (matches the P1b
+/// offscreen driver's `GBUFFER_FORMAT`). The ALBEDO image is also `SAMPLED` (the present-blit) —
+/// never stretched; presented 1:1 in the swapchain's top-left like [`SampledComposite`]. The
+/// NORMAL image has its own format since IBL1 P1: [`GNORMAL_FORMAT`].
 const GBUFFER_FORMAT: Format = Format::R8G8B8A8Unorm;
+
+/// IBL1 P1: the Deferred G-buffer NORMAL image's format (`gNormal`, MRT@1 of the mesh raster, the
+/// composite's store target, read by the resolve, the Deferred SSAO and the hwrt à-trous):
+/// `R16G16_UNORM`, the octahedral normal at 16 bits per channel (≈ 0.0013° mean / 0.0037° max
+/// error against oct8's 0.34° / 0.95°, verify M1). The 16-bit material id rides the albedo /
+/// material alpha lanes instead, so the normal costs the same 4 B/px. A REQUIRED boot row
+/// (`device::REQUIRED_FORMATS`). The ONE Rust spelling: the normal ring,
+/// [`GBUFFER_MRT_COLOR_FORMATS`] and every harness read it.
+pub const GNORMAL_FORMAT: Format = Format::R16G16Unorm;
+
+/// IBL1 P1: the VisibilityBuffer split's thin-aux normal (`thin_normal`, `vb_geo`'s `gThinNormal`)
+/// format. A different image from [`GNORMAL_FORMAT`]: the shaders that read it declare
+/// `gThinNormal` with this format, never `gNormal`.
+pub const VB_THIN_NORMAL_FORMAT: Format = GBUFFER_FORMAT;
+
+/// IBL1 P1: the mesh-raster MRT colour formats, slot for slot — `[gAlbedo, gNormal, gMaterial]`. The
+/// ring creates and every mesh-MRT pipeline's `color_formats` read this one array, so an attachment
+/// and its pipeline slot cannot disagree.
+pub const GBUFFER_MRT_COLOR_FORMATS: [Format; 3] = [GBUFFER_FORMAT, GNORMAL_FORMAT, GBUFFER_FORMAT];
+
+/// [`GBUFFER_MRT_COLOR_FORMATS`] plus a 4th MRT slot (`motion_vec` on the MV variants, `gPbr` on the
+/// TEXTURED one).
+#[must_use]
+pub const fn gbuffer_mrt_color_formats_with(extra: Format) -> [Format; 4] {
+    let [albedo, normal, material] = GBUFFER_MRT_COLOR_FORMATS;
+    [albedo, normal, material, extra]
+}
 
 /// Render wave PX1a (AD-1): the HDR scene colour's format — RGBA16F, PX0's decision
 /// (`docs/measurements/2026-10-16-px0-lit-format-decision.md`, row 2: AD-1's escape; the RTX 3060
@@ -2943,13 +2976,17 @@ impl CoreImages {
             depth_slots.map(|s| s.expect("invariant: every depth ring slot built before here"));
 
         // ALBEDO: STORAGE (marcher store) | SAMPLED (the present-blit, pass C) |
-        // COLOR_ATTACHMENT (Render P5-r0: the mesh raster pass A writes it as MRT@0).
+        // COLOR_ATTACHMENT (Render P5-r0: the mesh raster pass A writes it as MRT@0). The three
+        // MRT images take their formats from `GBUFFER_MRT_COLOR_FORMATS`, the array every mesh-MRT
+        // pipeline declares (IBL1 P1), so an attachment and its pipeline slot cannot disagree.
+        let [albedo_format, normal_format, material_format] = GBUFFER_MRT_COLOR_FORMATS;
         let mut albedo_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in albedo_slots.iter_mut() {
-            match GBufferTargets::create_gbuffer_image(
+            match GBufferTargets::create_gbuffer_image_fmt(
                 ctx,
                 extent,
+                albedo_format,
                 ImageUsage::STORAGE | ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
             ) {
                 Ok(t) => *slot = Some(t),
@@ -2968,9 +3005,10 @@ impl CoreImages {
         let mut normal_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in normal_slots.iter_mut() {
-            match GBufferTargets::create_gbuffer_image(
+            match GBufferTargets::create_gbuffer_image_fmt(
                 ctx,
                 extent,
+                normal_format,
                 ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
             ) {
                 Ok(t) => *slot = Some(t),
@@ -2988,9 +3026,10 @@ impl CoreImages {
         let mut material_slots: [Option<VulkanTexture>; FRAMES_IN_FLIGHT] =
             [const { None }; FRAMES_IN_FLIGHT];
         for slot in material_slots.iter_mut() {
-            match GBufferTargets::create_gbuffer_image(
+            match GBufferTargets::create_gbuffer_image_fmt(
                 ctx,
                 extent,
+                material_format,
                 ImageUsage::STORAGE | ImageUsage::COLOR_ATTACHMENT,
             ) {
                 Ok(t) => *slot = Some(t),
@@ -7450,8 +7489,9 @@ impl GBufferTargets {
         Some(slots.map(|s| s.expect("invariant: every vb_shadow_temporal slot built")))
     }
 
-    /// Creates a 2D `R8G8B8A8_UNORM` storage image at `extent` with `usage`. A small
-    /// helper shared by the albedo/normal/material allocations in [`Self::create`].
+    /// Creates a 2D `R8G8B8A8_UNORM` ([`GBUFFER_FORMAT`]) storage image at `extent` with
+    /// `usage` — the `display` and `aa_out` targets. The G-buffer MRT rings and `thin_normal`
+    /// name their formats through [`Self::create_gbuffer_image_fmt`] (IBL1 P1).
     fn create_gbuffer_image(
         ctx: &VulkanContext,
         extent: VkExtent2D,
@@ -9170,7 +9210,7 @@ impl GBufferTargets {
                     [const { None }; FRAMES_IN_FLIGHT];
                 let mut ok = true;
                 for slot in slots.iter_mut() {
-                    match Self::create_gbuffer_image(ctx, extent, ImageUsage::STORAGE) {
+                    match Self::create_gbuffer_image_fmt(ctx, extent, VB_THIN_NORMAL_FORMAT, ImageUsage::STORAGE) {
                         Ok(t) => *slot = Some(t),
                         Err(_) => {
                             ok = false;

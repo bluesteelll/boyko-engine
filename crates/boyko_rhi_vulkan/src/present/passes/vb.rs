@@ -4339,10 +4339,11 @@ impl Renderer<'_> {
             // (3.6, rung R9d) The VB split's hardware shadow chain — TLAS pack/build + the RT
             // soft-shadow VIS pre-pass + the `levels` à-trous passes + the temporal reproject.
             // Recorded in the SAME order `declare_vb_graph` declares them (after the SSAO/
-            // à-trous chain, before `ddgi_update`). Reuses the DEFERRED chain's shared pipeline
-            // objects (`scene.shadow`'s own `atrous_pipeline`/`temporal_pipeline` — one pipeline
-            // object, many per-path callers) against the split's OWN dedicated sets
-            // (`thin_normal`/`viewt` instead of the fat `gNormal`/`gViewT`). The tlas pack/build
+            // à-trous chain, before `ddgi_update`). Reuses the DEFERRED chain's shared temporal
+            // pipeline object (`scene.shadow`'s own `temporal_pipeline`) against the split's OWN
+            // dedicated sets (`thin_normal`/`viewt` instead of the fat `gNormal`/`gViewT`); the
+            // à-trous dispatches `atrous_pipeline_thin`, its twin on the same layout whose @2
+            // declares the RGBA8 `thin_normal` (IBL1 P1: the Deferred `gNormal` is RG16). The tlas pack/build
             // body is `record_gbuffer`'s own port, adapted to `record_vb_pass` for barriers.
             #[cfg(feature = "hwrt")]
             if let (Some(t), Some(fns)) = (scene.tlas.as_ref(), accel_fns) {
@@ -4487,24 +4488,25 @@ impl Renderer<'_> {
                     ts.cmd();
                     self.record_vb_pass(atrous_pass, cmd, targets, forward, vb, scene, fi);
                     let atrous_set = &level_ring[self.frame_index];
-                    // SAFETY: recording is open; the SHARED à-trous pipeline + its 6-binding
-                    // layout (the deferred boot object) are live on this device; `atrous_set`
-                    // binds `gVisIn`/`gVisOut` (the ping-pong pair) + `thin_normal`/`viewt` + the
-                    // `ResolvedShadowDenoise` UBO + the camera UBO; the 4-byte `{ uint step }`
-                    // push covers the pipeline's declared COMPUTE range; `dispatch_group_count_x`
-                    // covers the pixel count.
+                    // SAFETY: recording is open; the VB à-trous twin pipeline (IBL1 P1: the
+                    // module whose @2 declares the RGBA8 `gThinNormal`) + the SHARED 6-binding
+                    // layout (the deferred boot object it was built on) are live on this device;
+                    // `atrous_set` binds `gVisIn`/`gVisOut` (the ping-pong pair) +
+                    // `thin_normal`/`viewt` + the `ResolvedShadowDenoise` UBO + the camera UBO;
+                    // the 4-byte `{ uint step }` push covers the pipeline's declared COMPUTE
+                    // range; `dispatch_group_count_x` covers the pixel count.
                     unsafe {
                         ts.cmd();
                         (self.fns.cmd_bind_pipeline)(
                             cmd,
                             VK_PIPELINE_BIND_POINT_COMPUTE,
-                            sh.atrous_pipeline.pipeline,
+                            sh.atrous_pipeline_thin.pipeline,
                         );
                         ts.cmd();
                         (self.fns.cmd_bind_descriptor_sets)(
                             cmd,
                             VK_PIPELINE_BIND_POINT_COMPUTE,
-                            sh.atrous_pipeline.layout,
+                            sh.atrous_pipeline_thin.layout,
                             0,
                             1,
                             &atrous_set.descriptor_set,
@@ -4514,7 +4516,7 @@ impl Renderer<'_> {
                         ts.cmd();
                         (self.fns.cmd_push_constants)(
                             cmd,
-                            sh.atrous_pipeline.layout,
+                            sh.atrous_pipeline_thin.layout,
                             VK_SHADER_STAGE_COMPUTE_BIT,
                             0,
                             4,

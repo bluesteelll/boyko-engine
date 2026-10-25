@@ -286,7 +286,7 @@ fn polished_gold_lit(ao: u8) -> ([f32; 3], f32) {
     )];
     let attrs = MarcherAttributes {
         base_rgb,
-        oct_rg: [128, 128],
+        oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8([128, 128]),
         mat_id: 0,
         shadow: 255,
         ao,
@@ -557,7 +557,7 @@ fn polished_gold_clustered(ao: u8) -> ([f32; 3], [f32; 3], f32) {
     let (oct_rg, _) = oct_at_nov_0_7();
     let attrs = MarcherAttributes {
         base_rgb: gold.map(|c| (c * 255.0 + 0.5).floor() as u8),
-        oct_rg,
+        oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8(oct_rg),
         mat_id: 0,
         shadow: 255,
         ao,

@@ -51,7 +51,7 @@ fn build_gbuffer<F: Fn(i32, i32) -> (u8, f32)>(
             ssao_img.push(byte);
             gbuf.push(MarcherAttributes {
                 base_rgb: [0, 0, 0],
-                oct_rg: [128, 128],
+                oct_rg: boyko_rhi_vulkan::goldens::oct_codes_from_oct8([128, 128]),
                 mat_id: 0,
                 shadow: 255,
                 ao: 255,

@@ -59,7 +59,7 @@ use boyko_shaderdsl::shadow::sdf_soft_shadow_body;
 /// identical literal).
 ///
 /// Applied along the GEOMETRIC face normal, per the S1 gate's wording (`P + face_N *
-/// SHADOW_NORMAL_BIAS`). The SHIPPED mesh site (`sdf_gbuffer_composite.hlsl:1877-1878`) lifts
+/// SHADOW_NORMAL_BIAS`). The SHIPPED mesh site (`sdf_gbuffer_composite.hlsl:1904-1905`) lifts
 /// along the SHADING normal instead; SV0 introduces the face normal for exactly this bias
 /// (plan §4.2/§4.3). On this fixture the two differ by at most the tessellation's
 /// shading/geometric normal split (≈3° at 28×40), i.e. under `2e-5` of world offset — far below

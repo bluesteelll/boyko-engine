@@ -71,14 +71,42 @@
 # D:/tmp/render-orch/px1b/scratch/pin_by_hand.py grand_showcase <software|hwrt> <out.bmp>
 # CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc (window_present_gbuffer ignores BOYKO_HOST_DUMP and writes
 # the shared file).
+#
+# IBL1 P1 MOVED THESE BYTES BY 81631 PIXELS AT <= 5/255 (render lane u/render-ibl1, P1 C1-C3
+# 031c0e2c / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host from
+# the verify sweep's frames, rendered on C3 e84fb926 -- the review fix round to 8e652f61 (comments
+# and tests only, no .spv) moves no pixel; rulings 121 + 122). Reason: IBL1 P1: oct16 normal + the
+# oct8 tie removed (verify M1); rulings 121 + 122. gNormal is now oct16 in R16G16_UNORM, not oct8 in
+# RGBA8 (R16G16_UNORM storage + colour attachment is a REQUIRED boot row), and the 16-bit material
+# id rides gAlbedo.A (low byte) / gMaterial.A (high byte), an exact round trip, so the resolve's
+# decoded normal changes on every lit Deferred pixel: the oct8 error (0.335 deg mean / 0.942 deg
+# max, measured; the IBL1 cut, D-P1) and the tilt the device's round-down .5 tie gave flat surfaces
+# are gone; here the mesh room's flat floor and walls lose the oct8 tie rings (the diff shows the
+# moire of the removed tilt). This harness keeps its explicit ACES word (window_present_gbuffer; PXt
+# C10), so the tonemap is not part of this move. The look is signed by ruling 122, on the verify
+# sweep's sheet (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved set is exactly the 21
+# predicted Deferred legs, 0 class-Z movers, no background pixel moves (test_r1.md section 6; ruling
+# 122): 81631 of 262144 px changed (31.1398 %), 78932 of them by exactly 1 code; max |d| 5 (2 px at
+# the max), delta histogram {1: 78932, 2: 410, 3: 1705, 4: 582, 5: 2}, 76538 brighter / 5088 darker;
+# golden_diff.py compare --tiles 3 rc 0, max_delta r 5 g 4 b 4, changed_frac 0.136660 (changed
+# channels / all channels). software e7e25456 -> b184baef, hwrt e7e25456 -> b184baef; sha256_hwrt
+# still EQUALS sha256_software. Command, from D:\wt\ibl1: the values were set BY HAND from the
+# verify sweep's new_hashes.tsv (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md section
+# 6), not with scripts\golden.ps1 -Bless, which deletes this shared BMP; each is the sha256 of
+# D:\tmp\engine_grand_showcase.bmp, hashed (mtime-checked) right after PIN_TREE=D:/wt/ibl1 python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py grand_showcase <software|hwrt> <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc (window_present_gbuffer ignores BOYKO_HOST_DUMP and writes
+# the shared file; the sweep driver D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier
+# records of this pin stay as history; the line directly above sha256_software names this bless.
 crate           = "boyko_rhi_vulkan"
 test_binary     = "window_present_gbuffer"
 test_name       = "engine_grand_showcase_512_screenshot_dump"
 bmp             = "D:\\tmp\\engine_grand_showcase.bmp"
 width           = 512
 height          = 512
-sha256_software = "e7e25456a48d82e55343bdc65581370a4b2a7155a4d3e0d787966641ed91c6a0"
-sha256_hwrt     = "e7e25456a48d82e55343bdc65581370a4b2a7155a4d3e0d787966641ed91c6a0"
+# Re-blessed (both legs) at render lane IBL1 C4 under this harness's explicit ACES word (rulings 121 + 122): the verify sweep's frames, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/grand_showcase_software.bmp, B/grand_showcase_hwrt.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "b184baef6d5db6ca0943d7bf585291ea375b5ec2cf659f497cbbd72975d707de"
+sha256_hwrt     = "b184baef6d5db6ca0943d7bf585291ea375b5ec2cf659f497cbbd72975d707de"
 
 # Env the pin was blessed under. golden.ps1 SETS these explicitly (never inherits) and
 # CLEARS BOYKO_FORCE_SOFTWARE, so a stray shell env cannot silently change the pipeline.
@@ -109,15 +137,42 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # [2,69,33], 1 LSB of red lost to ACES cross-talk as green rises, which moves it toward
 # [forward_mesh]'s [0,70,33]. An A/B that pushed the old constant through the new path restored
 # f6147f90 on both legs, so the sun is the whole change. software == hwrt still holds.
+#
+# IBL1 P1 MOVED THESE BYTES BY 12549 PIXELS AT <= 18/255 (render lane u/render-ibl1, P1 C1-C3
+# 031c0e2c / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host under
+# the Khronos PBR Neutral default from the verify sweep's frames, rendered on C3 e84fb926 -- the
+# review fix round to 8e652f61 (comments and tests only, no .spv) moves no pixel; rulings 121 +
+# 122). Reason: IBL1 P1: oct16 normal + the oct8 tie removed (verify M1); rulings 121 + 122. gNormal
+# is now oct16 in R16G16_UNORM, not oct8 in RGBA8 (R16G16_UNORM storage + colour attachment is a
+# REQUIRED boot row), and the 16-bit material id rides gAlbedo.A (low byte) / gMaterial.A (high
+# byte), an exact round trip, so the resolve's decoded normal changes on every lit Deferred pixel:
+# the oct8 error (0.335 deg mean / 0.942 deg max, measured; the IBL1 cut, D-P1) and the tilt the
+# device's round-down .5 tie gave flat surfaces are gone; here the five spheres, by up to 18 codes
+# on their specular rims only (the gold and blue metals' lobes; ruling 122). The look is signed by
+# ruling 122, on the verify sweep's sheet (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved
+# set is exactly the 21 predicted Deferred legs, 0 class-Z movers, no background pixel moves
+# (test_r1.md section 6; ruling 122): 12549 of 262144 px changed (4.7871 %), 11252 of them by
+# exactly 1 code; max |d| 18 (1 px at the max), delta histogram {1: 11252, 2: 880, 3: 209, 4: 104,
+# 5: 47, 6: 12, 7: 11, 8: 12, 9: 8, 10: 1, 11: 4, 12: 2, 15: 5, 16: 1, 18: 1}, 6312 brighter / 6121
+# darker; golden_diff.py compare --tiles 3 rc 0, max_delta r 18 g 14 b 15, changed_frac 0.024770
+# (changed channels / all channels). software 0698275c -> ea00db5a, hwrt 0698275c -> ea00db5a;
+# sha256_hwrt still EQUALS sha256_software. Command, from D:\wt\ibl1: the values were set BY HAND
+# from the verify sweep's new_hashes.tsv (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md
+# section 6), not with scripts\golden.ps1 -Bless; each is the sha256 of the BMP that
+# PIN_TREE=D:/wt/ibl1 python -I D:/tmp/render-orch/px1b/scratch/pin_by_hand.py grand_showcase_2mat
+# <software|hwrt> <out.bmp> CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered (the sweep driver
+# D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier records of this pin stay as history;
+# the line directly above sha256_software names this bless.
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_screenshot_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
-sha256_software = "0698275c01dff203c82862a0ccd6c49a8d27141fb8d4f175cc3797d845a20511"
-sha256_hwrt     = "0698275c01dff203c82862a0ccd6c49a8d27141fb8d4f175cc3797d845a20511"
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by IBL1 C4 (next line): those frames hash to the old values, software 0698275c and hwrt 0698275c.
+# Re-blessed (both legs) at render lane IBL1 C4 under the Khronos PBR Neutral default (rulings 116 + 121 + 122): the verify sweep's frames, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/grand_showcase_2mat_software.bmp, B/grand_showcase_2mat_hwrt.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "ea00db5a37432608e95e50767ed3b87c8f3219b836b203b9926bdf814eba7c3f"
+sha256_hwrt     = "ea00db5a37432608e95e50767ed3b87c8f3219b836b203b9926bdf814eba7c3f"
 
 [grand_showcase_2mat.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -163,14 +218,42 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # D:/tmp/render-orch/px1b/scratch/pin_by_hand.py deferred_sdf_only <software|hwrt> <out.bmp>
 # CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc (window_present_gbuffer ignores BOYKO_HOST_DUMP and writes
 # the shared file).
+#
+# IBL1 P1 MOVED THESE BYTES BY 3526 PIXELS AT <= 3/255 (render lane u/render-ibl1, P1 C1-C3 031c0e2c
+# / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host from the
+# verify sweep's frames, rendered on C3 e84fb926 -- the review fix round to 8e652f61 (comments and
+# tests only, no .spv) moves no pixel; rulings 121 + 122). Reason: IBL1 P1: oct16 normal + the oct8
+# tie removed (verify M1); rulings 121 + 122. gNormal is now oct16 in R16G16_UNORM, not oct8 in
+# RGBA8 (R16G16_UNORM storage + colour attachment is a REQUIRED boot row), and the 16-bit material
+# id rides gAlbedo.A (low byte) / gMaterial.A (high byte), an exact round trip, so the resolve's
+# decoded normal changes on every lit Deferred pixel: the oct8 error (0.335 deg mean / 0.942 deg
+# max, measured; the IBL1 cut, D-P1) and the tilt the device's round-down .5 tie gave flat surfaces
+# are gone; here the two SDF spheres' lit surfaces (the mesh leg is off). This harness keeps its
+# explicit ACES word (window_present_gbuffer; PXt C10), so the tonemap is not part of this move. The
+# look is signed by ruling 122, on the verify sweep's sheet
+# (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved set is exactly the 21 predicted Deferred
+# legs, 0 class-Z movers, no background pixel moves (test_r1.md section 6; ruling 122): 3526 of
+# 262144 px changed (1.3451 %), 3357 of them by exactly 1 code; max |d| 3 (15 px at the max), delta
+# histogram {1: 3357, 2: 154, 3: 15}, 1868 brighter / 1658 darker; golden_diff.py compare --tiles 3
+# rc 0, max_delta r 3 g 3 b 3, changed_frac 0.007010 (changed channels / all channels). software
+# 477c36c5 -> 637ed63b, hwrt 477c36c5 -> 637ed63b; sha256_hwrt still EQUALS sha256_software.
+# Command, from D:\wt\ibl1: the values were set BY HAND from the verify sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md section 6), not with scripts\golden.ps1
+# -Bless, which deletes this shared BMP; each is the sha256 of D:\tmp\deferred_sdf_only.bmp, hashed
+# (mtime-checked) right after PIN_TREE=D:/wt/ibl1 python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py deferred_sdf_only <software|hwrt> <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc (window_present_gbuffer ignores BOYKO_HOST_DUMP and writes
+# the shared file; the sweep driver D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier
+# records of this pin stay as history; the line directly above sha256_software names this bless.
 crate           = "boyko_rhi_vulkan"
 test_binary     = "window_present_gbuffer"
 test_name       = "engine_deferred_sdf_only_512_screenshot_dump"
 bmp             = "D:\\tmp\\deferred_sdf_only.bmp"
 width           = 512
 height          = 512
-sha256_software = "477c36c5d142ef98b2310f727ccb09605673cade2eb4c4947017be381ca92770"
-sha256_hwrt     = "477c36c5d142ef98b2310f727ccb09605673cade2eb4c4947017be381ca92770"
+# Re-blessed (both legs) at render lane IBL1 C4 under this harness's explicit ACES word (rulings 121 + 122): the verify sweep's frames, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/deferred_sdf_only_software.bmp, B/deferred_sdf_only_hwrt.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "637ed63b856d2885c05394ce6b8c33c9f54c1ad769bccc4072653964cf6de04a"
+sha256_hwrt     = "637ed63b856d2885c05394ce6b8c33c9f54c1ad769bccc4072653964cf6de04a"
 
 [deferred_sdf_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -191,14 +274,43 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # BLESSED at introduction (commit edbf3f0, "Deferred mesh-only leg -- SDF leg fully off
 # (R3b)"): the sha256_* values below are the real bless output, not placeholders -- this
 # file's only mechanically-checked unblessed sentinel is the literal "PENDING".
+#
+# IBL1 P1 MOVED THESE BYTES BY 78861 PIXELS AT <= 5/255 (render lane u/render-ibl1, P1 C1-C3
+# 031c0e2c / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host from
+# the verify sweep's frames, rendered on C3 e84fb926 -- the review fix round to 8e652f61 (comments
+# and tests only, no .spv) moves no pixel; rulings 121 + 122). Reason: IBL1 P1: oct16 normal + the
+# oct8 tie removed (verify M1); rulings 121 + 122. gNormal is now oct16 in R16G16_UNORM, not oct8 in
+# RGBA8 (R16G16_UNORM storage + colour attachment is a REQUIRED boot row), and the 16-bit material
+# id rides gAlbedo.A (low byte) / gMaterial.A (high byte), an exact round trip, so the resolve's
+# decoded normal changes on every lit Deferred pixel: the oct8 error (0.335 deg mean / 0.942 deg
+# max, measured; the IBL1 cut, D-P1) and the tilt the device's round-down .5 tie gave flat surfaces
+# are gone; here the mesh room's flat floor and walls lose the oct8 tie rings (the diff shows the
+# moire of the removed tilt; the SDF leg is off). This harness keeps its explicit ACES word
+# (window_present_gbuffer; PXt C10), so the tonemap is not part of this move. The look is signed by
+# ruling 122, on the verify sweep's sheet (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved
+# set is exactly the 21 predicted Deferred legs, 0 class-Z movers, no background pixel moves
+# (test_r1.md section 6; ruling 122): 78861 of 262144 px changed (30.0831 %), 76336 of them by
+# exactly 1 code; max |d| 5 (2 px at the max), delta histogram {1: 76336, 2: 251, 3: 1690, 4: 582,
+# 5: 2}, 75809 brighter / 3047 darker; golden_diff.py compare --tiles 3 rc 0, max_delta r 5 g 4 b 4,
+# changed_frac 0.130161 (changed channels / all channels). software 0597fa34 -> d322cdd0, hwrt
+# 0597fa34 -> d322cdd0; sha256_hwrt still EQUALS sha256_software. Command, from D:\wt\ibl1: the
+# values were set BY HAND from the verify sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md section 6), not with scripts\golden.ps1
+# -Bless, which deletes this shared BMP; each is the sha256 of D:\tmp\deferred_mesh_only.bmp, hashed
+# (mtime-checked) right after PIN_TREE=D:/wt/ibl1 python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py deferred_mesh_only <software|hwrt> <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc (window_present_gbuffer ignores BOYKO_HOST_DUMP and writes
+# the shared file; the sweep driver D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier
+# records of this pin stay as history; the line directly above sha256_software names this bless.
 crate           = "boyko_rhi_vulkan"
 test_binary     = "window_present_gbuffer"
 test_name       = "engine_deferred_mesh_only_512_screenshot_dump"
 bmp             = "D:\\tmp\\deferred_mesh_only.bmp"
 width           = 512
 height          = 512
-sha256_software = "0597fa34889681b42deacb62ed5179a9071268dcb6f9246759cb1f3c80ab826a"
-sha256_hwrt     = "0597fa34889681b42deacb62ed5179a9071268dcb6f9246759cb1f3c80ab826a"
+# Re-blessed (both legs) at render lane IBL1 C4 under this harness's explicit ACES word (rulings 121 + 122): the verify sweep's frames, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/deferred_mesh_only_software.bmp, B/deferred_mesh_only_hwrt.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "d322cdd0d0b36cebaf159b7a0838551446db140187d8b78a8259768136458573"
+sha256_hwrt     = "d322cdd0d0b36cebaf159b7a0838551446db140187d8b78a8259768136458573"
 
 [deferred_mesh_only.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1033,6 +1145,36 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # (D:/tmp/render-orch/ssaom/merge/sweep.md), not with scripts\golden.ps1 -Bless; each is the sha256
 # of the BMP that PIN_TREE=D:/wt/render python -I D:/tmp/render-orch/px1b/scratch/pin_by_hand.py
 # taa_armed <software|hwrt> <out.bmp> CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered.
+#
+# IBL1 P1 MOVED THESE BYTES BY 67653-68111 PIXELS AT <= 3/255 (render lane u/render-ibl1, P1 C1-C3
+# 031c0e2c / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host under
+# the Khronos PBR Neutral default from the verify sweep's frames, rendered on C3 e84fb926 -- the
+# review fix round to 8e652f61 (comments and tests only, no .spv) moves no pixel; rulings 121 +
+# 122). Reason: IBL1 P1: oct16 normal + the oct8 tie removed (verify M1); rulings 121 + 122. gNormal
+# is now oct16 in R16G16_UNORM, not oct8 in RGBA8 (R16G16_UNORM storage + colour attachment is a
+# REQUIRED boot row), and the 16-bit material id rides gAlbedo.A (low byte) / gMaterial.A (high
+# byte), an exact round trip, so the resolve's decoded normal changes on every lit Deferred pixel:
+# the oct8 error (0.335 deg mean / 0.942 deg max, measured; the IBL1 cut, D-P1) and the tilt the
+# device's round-down .5 tie gave flat surfaces are gone; here the Deferred x Both scene (five
+# caster cubes, the floor, the wall and the SDF sphere), carried by TAA. The look is signed by
+# ruling 122, on the verify sweep's sheet (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved
+# set is exactly the 21 predicted Deferred legs, 0 class-Z movers, no background pixel moves
+# (test_r1.md section 6; ruling 122) -- software: 68111 of 262144 px changed (25.9823 %), 68024 of
+# them by exactly 1 code; max |d| 3 (6 px at the max), delta histogram {1: 68024, 2: 81, 3: 6},
+# 65544 brighter / 2564 darker; golden_diff.py compare --tiles 3 rc 0, max_delta r 3 g 3 b 3,
+# changed_frac 0.106224 (changed channels / all channels); hwrt: 67653 of 262144 px changed (25.8076
+# %), 67568 of them by exactly 1 code; max |d| 3 (5 px at the max), delta histogram {1: 67568, 2:
+# 80, 3: 5}, 65090 brighter / 2561 darker; golden_diff.py compare --tiles 3 rc 0, max_delta r 3 g 2
+# b 3, changed_frac 0.105602 (changed channels / all channels). software 154af3ce -> 6fadbb17, hwrt
+# ce5ca482 -> 06295a5a; sha256_hwrt still DIVERGES from sha256_software, and these bytes still
+# differ from [taa_armed_basis]'s, so the shear is still live. Command, from D:\wt\ibl1: the values
+# were set BY HAND from the verify sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md section 6), not with scripts\golden.ps1
+# -Bless; each is the sha256 of the BMP that PIN_TREE=D:/wt/ibl1 python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py taa_armed <software|hwrt> <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered (the sweep driver
+# D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier records of this pin stay as history;
+# the line directly above sha256_software names this bless.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
@@ -1040,9 +1182,10 @@ bmp             = "D:\\tmp\\taa_armed.bmp"
 width           = 512
 height          = 512
 # Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software 92bf66a1 and hwrt 6c96177a.
-# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_armed_software.bmp, B/taa_armed_hwrt.bmp).
-sha256_software = "154af3ce60af65a9eaf7d6e271d29416a5c4ac38df20a58791a8bc0a81241aaf"
-sha256_hwrt     = "ce5ca482aff98934eca9a40f0592df2b6ef097f2c709d98f2b68e58c11af741b"
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_armed_software.bmp, B/taa_armed_hwrt.bmp). Superseded by IBL1 C4 (next line): those frames hash to the old values, software 154af3ce and hwrt ce5ca482.
+# Re-blessed (both legs) at render lane IBL1 C4 under the Khronos PBR Neutral default (rulings 116 + 121 + 122): the verify sweep's frames, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/taa_armed_software.bmp, B/taa_armed_hwrt.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "6fadbb17b37100eeca80a7eb3340949b361e37e8107de342a3107f6419df1252"
+sha256_hwrt     = "06295a5a71d2b2878038bbbec9be43854c001816f28ec783d271847c7efcfc79"
 
 [taa_armed.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1143,6 +1286,35 @@ BOYKO_TAA_SCOPE          = "raster"
 # (D:/tmp/render-orch/ssaom/merge/sweep.md), not with scripts\golden.ps1 -Bless; each is the sha256
 # of the BMP that PIN_TREE=D:/wt/render python -I D:/tmp/render-orch/px1b/scratch/pin_by_hand.py
 # taa_armed_basis <software|hwrt> <out.bmp> CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered.
+#
+# IBL1 P1 MOVED THESE BYTES BY 66061-66327 PIXELS AT <= 4/255 (render lane u/render-ibl1, P1 C1-C3
+# 031c0e2c / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host under
+# the Khronos PBR Neutral default from the verify sweep's frames, rendered on C3 e84fb926 -- the
+# review fix round to 8e652f61 (comments and tests only, no .spv) moves no pixel; rulings 121 +
+# 122). Reason: IBL1 P1: oct16 normal + the oct8 tie removed (verify M1); rulings 121 + 122. gNormal
+# is now oct16 in R16G16_UNORM, not oct8 in RGBA8 (R16G16_UNORM storage + colour attachment is a
+# REQUIRED boot row), and the 16-bit material id rides gAlbedo.A (low byte) / gMaterial.A (high
+# byte), an exact round trip, so the resolve's decoded normal changes on every lit Deferred pixel:
+# the oct8 error (0.335 deg mean / 0.942 deg max, measured; the IBL1 cut, D-P1) and the tilt the
+# device's round-down .5 tie gave flat surfaces are gone; here the Deferred x Both scene (five
+# caster cubes, the floor, the wall and the SDF sphere), carried by TAA. The look is signed by
+# ruling 122, on the verify sweep's sheet (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved
+# set is exactly the 21 predicted Deferred legs, 0 class-Z movers, no background pixel moves
+# (test_r1.md section 6; ruling 122) -- software: 66061 of 262144 px changed (25.2003 %), 66053 of
+# them by exactly 1 code; max |d| 4 (1 px at the max), delta histogram {1: 66053, 2: 6, 3: 1, 4: 1},
+# 64035 brighter / 2016 darker; golden_diff.py compare --tiles 3 rc 0, max_delta r 1 g 2 b 4,
+# changed_frac 0.102020 (changed channels / all channels); hwrt: 66327 of 262144 px changed (25.3017
+# %), 66319 of them by exactly 1 code; max |d| 4 (1 px at the max), delta histogram {1: 66319, 2: 6,
+# 3: 1, 4: 1}, 64275 brighter / 2043 darker; golden_diff.py compare --tiles 3 rc 0, max_delta r 1 g
+# 2 b 4, changed_frac 0.102267 (changed channels / all channels). software 456edff4 -> 83a0cbad,
+# hwrt d25cd02c -> e12df521; sha256_hwrt still DIVERGES from sha256_software, and these bytes still
+# differ from [taa_armed]'s, so the shear is still live. Command, from D:\wt\ibl1: the values were
+# set BY HAND from the verify sweep's new_hashes.tsv (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv;
+# test_r1.md section 6), not with scripts\golden.ps1 -Bless; each is the sha256 of the BMP that
+# PIN_TREE=D:/wt/ibl1 python -I D:/tmp/render-orch/px1b/scratch/pin_by_hand.py taa_armed_basis
+# <software|hwrt> <out.bmp> CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered (the sweep driver
+# D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier records of this pin stay as history;
+# the line directly above sha256_software names this bless.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
@@ -1150,9 +1322,10 @@ bmp             = "D:\\tmp\\taa_armed_basis.bmp"
 width           = 512
 height          = 512
 # Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software 0fff8ec9 and hwrt de322954.
-# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_armed_basis_software.bmp, B/taa_armed_basis_hwrt.bmp).
-sha256_software = "456edff417d43a15faefb35817bfeab6e09f6cb3f6acc6652aea4d69ad26383a"
-sha256_hwrt     = "d25cd02c1d3d55e37786afc1f1f6da543e12397b895571887267228ba72b9454"
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_armed_basis_software.bmp, B/taa_armed_basis_hwrt.bmp). Superseded by IBL1 C4 (next line): those frames hash to the old values, software 456edff4 and hwrt d25cd02c.
+# Re-blessed (both legs) at render lane IBL1 C4 under the Khronos PBR Neutral default (rulings 116 + 121 + 122): the verify sweep's frames, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/taa_armed_basis_software.bmp, B/taa_armed_basis_hwrt.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "83a0cbadbb0bda7d6d7eec180b9cf1d95bda745d3ee4fa50f375b2f3b15356cc"
+sha256_hwrt     = "e12df52181eb107f74c49b9976323fda04f04881fef50a92d008296e5fe1f5ef"
 
 [taa_armed_basis.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1227,6 +1400,36 @@ BOYKO_WIN                = "512"
 # scripts\golden.ps1 -Bless; each is the sha256 of the BMP that PIN_TREE=D:/wt/render python -I
 # D:/tmp/render-orch/px1b/scratch/pin_by_hand.py taa_rcas <software|hwrt> <out.bmp>
 # CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered.
+#
+# IBL1 P1 MOVED THESE BYTES BY 70156-70302 PIXELS AT <= 8/255 (render lane u/render-ibl1, P1 C1-C3
+# 031c0e2c / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host under
+# the Khronos PBR Neutral default from the verify sweep's frames, rendered on C3 e84fb926 -- the
+# review fix round to 8e652f61 (comments and tests only, no .spv) moves no pixel; rulings 121 +
+# 122). Reason: IBL1 P1: oct16 normal + the oct8 tie removed (verify M1); rulings 121 + 122. gNormal
+# is now oct16 in R16G16_UNORM, not oct8 in RGBA8 (R16G16_UNORM storage + colour attachment is a
+# REQUIRED boot row), and the 16-bit material id rides gAlbedo.A (low byte) / gMaterial.A (high
+# byte), an exact round trip, so the resolve's decoded normal changes on every lit Deferred pixel:
+# the oct8 error (0.335 deg mean / 0.942 deg max, measured; the IBL1 cut, D-P1) and the tilt the
+# device's round-down .5 tie gave flat surfaces are gone; here the Deferred x Both scene (five
+# caster cubes, the floor, the wall and the SDF sphere), carried by TAA and sharpened by RCAS. The
+# look is signed by ruling 122, on the verify sweep's sheet
+# (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved set is exactly the 21 predicted Deferred
+# legs, 0 class-Z movers, no background pixel moves (test_r1.md section 6; ruling 122) -- software:
+# 70156 of 262144 px changed (26.7624 %), 70106 of them by exactly 1 code; max |d| 8 (1 px at the
+# max), delta histogram {1: 70106, 2: 44, 3: 3, 4: 1, 5: 1, 8: 1}, 65565 brighter / 4469 darker;
+# golden_diff.py compare --tiles 3 rc 0, max_delta r 2 g 4 b 8, changed_frac 0.111118 (changed
+# channels / all channels); hwrt: 70302 of 262144 px changed (26.8181 %), 70248 of them by exactly 1
+# code; max |d| 8 (1 px at the max), delta histogram {1: 70248, 2: 47, 3: 4, 4: 1, 5: 1, 8: 1},
+# 65767 brighter / 4423 darker; golden_diff.py compare --tiles 3 rc 0, max_delta r 2 g 4 b 8,
+# changed_frac 0.111385 (changed channels / all channels). software bcb40748 -> 2eb533ac, hwrt
+# 72959155 -> 847109ab; sha256_hwrt still DIVERGES from sha256_software, and these bytes still
+# differ from [taa_armed_basis]'s, so RCAS still runs. Command, from D:\wt\ibl1: the values were set
+# BY HAND from the verify sweep's new_hashes.tsv (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv;
+# test_r1.md section 6), not with scripts\golden.ps1 -Bless; each is the sha256 of the BMP that
+# PIN_TREE=D:/wt/ibl1 python -I D:/tmp/render-orch/px1b/scratch/pin_by_hand.py taa_rcas
+# <software|hwrt> <out.bmp> CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered (the sweep driver
+# D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier records of this pin stay as history;
+# the line directly above sha256_software names this bless.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
@@ -1234,9 +1437,10 @@ bmp             = "D:\\tmp\\taa_rcas.bmp"
 width           = 512
 height          = 512
 # Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by SSAOM C5 (next line): those frames hash to the old values, software cfe988f4 and hwrt ab7e62a2.
-# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_rcas_software.bmp, B/taa_rcas_hwrt.bmp).
-sha256_software = "bcb407481775736b9c1e8823ec95255b26991ea398d6a5036467c66147beac8f"
-sha256_hwrt     = "72959155c152fec9b1f917859c2ae0bce934af86cee9f0a77f24108f20cf9a14"
+# Re-blessed (both legs) at render bug lane SSAOM C5 6f0c8a3e under the Khronos PBR Neutral default (rulings 116 + 120): the sweep's frames, rendered on the trunk sync 380081ea (D:/tmp/render-orch/ssaom/merge/sweep/A/taa_rcas_software.bmp, B/taa_rcas_hwrt.bmp). Superseded by IBL1 C4 (next line): those frames hash to the old values, software bcb40748 and hwrt 72959155.
+# Re-blessed (both legs) at render lane IBL1 C4 under the Khronos PBR Neutral default (rulings 116 + 121 + 122): the verify sweep's frames, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/taa_rcas_software.bmp, B/taa_rcas_hwrt.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "2eb533acc491fcb5a01478444dce7695d36fbb53f0d1ae1df0610905df01aed5"
+sha256_hwrt     = "847109abd5eff8c13d4615e84a920629f10946851eec6f8ed8813c6392a5918e"
 
 [taa_rcas.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1641,15 +1845,41 @@ BOYKO_GEOMETRY_LEGS      = "sdf"
 # golden.ps1 wipes every stray BOYKO_* before applying this block, so the absence is reliable.
 # Blessed 2026-09-18 on the msvc host at ea6b1df8 on BOTH legs, each leg on its own run: the hwrt
 # equality is measured, not assumed.
+#
+# IBL1 P1 MOVED THESE BYTES BY 4855 PIXELS AT <= 3/255 (render lane u/render-ibl1, P1 C1-C3 031c0e2c
+# / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host under the
+# Khronos PBR Neutral default from the verify sweep's frames, rendered on C3 e84fb926 -- the review
+# fix round to 8e652f61 (comments and tests only, no .spv) moves no pixel; rulings 121 + 122).
+# Reason: IBL1 P1: oct16 normal + the oct8 tie removed (verify M1); rulings 121 + 122. gNormal is
+# now oct16 in R16G16_UNORM, not oct8 in RGBA8 (R16G16_UNORM storage + colour attachment is a
+# REQUIRED boot row), and the 16-bit material id rides gAlbedo.A (low byte) / gMaterial.A (high
+# byte), an exact round trip, so the resolve's decoded normal changes on every lit Deferred pixel:
+# the oct8 error (0.335 deg mean / 0.942 deg max, measured; the IBL1 cut, D-P1) and the tilt the
+# device's round-down .5 tie gave flat surfaces are gone; here the SDF sphere's lit surface
+# (Deferred x Sdf: no mesh leg). The look is signed by ruling 122, on the verify sweep's sheet
+# (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved set is exactly the 21 predicted Deferred
+# legs, 0 class-Z movers, no background pixel moves (test_r1.md section 6; ruling 122): 4855 of
+# 262144 px changed (1.8520 %), 4631 of them by exactly 1 code; max |d| 3 (6 px at the max), delta
+# histogram {1: 4631, 2: 218, 3: 6}, 2515 brighter / 2339 darker; golden_diff.py compare --tiles 3
+# rc 0, max_delta r 3 g 3 b 2, changed_frac 0.010672 (changed channels / all channels). software
+# cc66eda3 -> 21b3ac35, hwrt cc66eda3 -> 21b3ac35; sha256_hwrt still EQUALS sha256_software.
+# Command, from D:\wt\ibl1: the values were set BY HAND from the verify sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md section 6), not with scripts\golden.ps1
+# -Bless; each is the sha256 of the BMP that PIN_TREE=D:/wt/ibl1 python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py deferred_sdf_casters <software|hwrt> <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered (the sweep driver
+# D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier records of this pin stay as history;
+# the line directly above sha256_software names this bless.
 crate           = "boyko-app"
 test_binary     = "taa_jitter_eval"
 test_name       = "taa_jitter_eval_screenshot_dump"
 bmp             = "D:\\tmp\\deferred_sdf_casters.bmp"
 width           = 512
 height          = 512
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
-sha256_software = "cc66eda3237a6668ff1bcbb772fe964397f94696ca615a86084fd16d51d55dbf"
-sha256_hwrt     = "cc66eda3237a6668ff1bcbb772fe964397f94696ca615a86084fd16d51d55dbf"
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by IBL1 C4 (next line): those frames hash to the old values, software cc66eda3 and hwrt cc66eda3.
+# Re-blessed (both legs) at render lane IBL1 C4 under the Khronos PBR Neutral default (rulings 116 + 121 + 122): the verify sweep's frames, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/deferred_sdf_casters_software.bmp, B/deferred_sdf_casters_hwrt.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "21b3ac35580ef1bae462b50e7620c0a35436c38b71adbdd8356c6e9514a4de4a"
+sha256_hwrt     = "21b3ac35580ef1bae462b50e7620c0a35436c38b71adbdd8356c6e9514a4de4a"
 
 [deferred_sdf_casters.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1791,6 +2021,33 @@ BOYKO_RENDER_PATH        = "vb"
 # merged depth differs from the disarmed depth on 19176 pixels of frame 30 while 0 colour pixels
 # change - no billboard sits behind the slab from this camera. Nothing to re-bless (golden.ps1
 # -Pin particle_sdf_collide -Check, run from the lane's tree).
+#
+# IBL1 P1 MOVED THESE BYTES BY 35530 PIXELS AT 1/255 (render lane u/render-ibl1, P1 C1-C3 031c0e2c /
+# 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host under the
+# Khronos PBR Neutral default from the verify sweep's frames, rendered on C3 e84fb926 -- the review
+# fix round to 8e652f61 (comments and tests only, no .spv) moves no pixel; rulings 121 + 122).
+# Reason: IBL1 P1: oct16 normal + the oct8 tie removed (verify M1); rulings 121 + 122. gNormal is
+# now oct16 in R16G16_UNORM, not oct8 in RGBA8 (R16G16_UNORM storage + colour attachment is a
+# REQUIRED boot row), and the 16-bit material id rides gAlbedo.A (low byte) / gMaterial.A (high
+# byte), an exact round trip, so the resolve's decoded normal changes on every lit Deferred pixel:
+# the oct8 error (0.335 deg mean / 0.942 deg max, measured; the IBL1 cut, D-P1) and the tilt the
+# device's round-down .5 tie gave flat surfaces are gone; here the lit slab and floor, by 1 code.
+# The look is signed by ruling 122, on the verify sweep's sheet
+# (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved set is exactly the 21 predicted Deferred
+# legs, 0 class-Z movers, no background pixel moves (test_r1.md section 6; ruling 122): 35530 of
+# 262144 px changed (13.5536 %), 35530 of them by exactly 1 code; max |d| 1 (35530 px at the max),
+# delta histogram {1: 35530}, 30276 brighter / 5253 darker; golden_diff.py compare --tiles 3 rc 0,
+# max_delta r 1 g 1 b 1, changed_frac 0.055337 (changed channels / all channels). software 395d906e
+# -> c5bd2409, hwrt 395d906e -> c5bd2409; sha256_hwrt still EQUALS sha256_software. K2's later-flip
+# rule: two more runs per leg (D:/tmp/render-orch/ibl1/sweep/k2/) rendered the same new sha256 on
+# both legs, so there is no order noise and no tolerance mode. Command, from D:\wt\ibl1: the values
+# were set BY HAND from the verify sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md section 6), not with scripts\golden.ps1
+# -Bless; each is the sha256 of the BMP that PIN_TREE=D:/wt/ibl1 python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py particle_sdf_collide <software|hwrt> <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered (the sweep driver
+# D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier records of this pin stay as history;
+# the line directly above sha256_software names this bless.
 crate           = "boyko-app"
 test_binary     = "particle_lab"
 test_name       = "particle_lab_screenshot_dump"
@@ -1806,12 +2063,14 @@ height          = 512
 # constant (crates/boyko_app/tests/particle_scene/mod.rs, SUN_DIR), so the marcher's sun changed
 # only in its bits -- the rounding recorded in [taa_armed]. An A/B that pushed the raw constant
 # through the new path restored 729f5ad6. The re-pin carries that rounding; it is not the sign-off.
-# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5.
-sha256_software = "395d906eb4de51f0b7e5c28a89733085b90f959b5b4d4f8cf827d438f250351c"
+# Re-blessed (both legs) at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frames, rendered on C8b 38ac3ec5. Superseded by IBL1 C4 (next line): those frames hash to the old values, software 395d906e and hwrt 395d906e.
+# Re-blessed (both legs) at render lane IBL1 C4 under the Khronos PBR Neutral default (rulings 116 + 121 + 122): the verify sweep's frames, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/particle_sdf_collide_software.bmp, B/particle_sdf_collide_hwrt.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "c5bd24091306082166cd10486aee26a307249aa6467d6c86ad48e6272575d01d"
 # The HW-RT leg was first run during R2's testing (2026-09-19): 729f5ad6 on the pre-R2 tree and
 # c6a055a1 after, equal to the software leg both times; this re-pin's own run rendered c6a055a1
-# again. Pinned from that run; re-blessed at PX1a C14 with the software leg (above), equal to it.
-sha256_hwrt     = "395d906eb4de51f0b7e5c28a89733085b90f959b5b4d4f8cf827d438f250351c"
+# again. Pinned from that run; re-blessed at PX1a C14 with the software leg (above), equal to it. Superseded (PXt C10 re-blessed both legs, the record above sha256_software; then IBL1 C4, next line): the old value 395d906e is the h3n frame's.
+# Re-blessed at render lane IBL1 C4 with the software leg (the IBL1 C4 line above sha256_software), equal to it: the verify sweep's frame D:/tmp/render-orch/ibl1/sweep/B/particle_sdf_collide_hwrt.bmp, rendered on C3 e84fb926.
+sha256_hwrt     = "c5bd24091306082166cd10486aee26a307249aa6467d6c86ad48e6272575d01d"
 
 [particle_sdf_collide.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1829,14 +2088,41 @@ BOYKO_PARTICLE_COLLIDE   = "1"
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
 # pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
 # 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69); re-blessed at PX1a C14 (on 031aae18) at the HDR lit.
+#
+# IBL1 P1 MOVED THESE BYTES BY 12686 PIXELS AT <= 24/255 (render lane u/render-ibl1, P1 C1-C3
+# 031c0e2c / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host under
+# the Khronos PBR Neutral default from the verify sweep's frames, rendered on C3 e84fb926 -- the
+# review fix round to 8e652f61 (comments and tests only, no .spv) moves no pixel; rulings 121 +
+# 122). Reason: IBL1 P1: oct16 normal + the oct8 tie removed (verify M1); rulings 121 + 122. gNormal
+# is now oct16 in R16G16_UNORM, not oct8 in RGBA8 (R16G16_UNORM storage + colour attachment is a
+# REQUIRED boot row), and the 16-bit material id rides gAlbedo.A (low byte) / gMaterial.A (high
+# byte), an exact round trip, so the resolve's decoded normal changes on every lit Deferred pixel:
+# the oct8 error (0.335 deg mean / 0.942 deg max, measured; the IBL1 cut, D-P1) and the tilt the
+# device's round-down .5 tie gave flat surfaces are gone; here the same five-sphere scene through
+# FXAA, by up to 24 codes on the specular rims only (ruling 122). The look is signed by ruling 122,
+# on the verify sweep's sheet (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved set is exactly
+# the 21 predicted Deferred legs, 0 class-Z movers, no background pixel moves (test_r1.md section 6;
+# ruling 122) -- software: 12686 of 262144 px changed (4.8393 %), 11297 of them by exactly 1 code;
+# max |d| 24 (1 px at the max), delta histogram {1: 11297, 2: 903, 3: 225, 4: 115, 5: 51, 6: 17, 7:
+# 16, 8: 14, 9: 11, 10: 7, 11: 10, 12: 7, 13: 4, 14: 2, 15: 4, 18: 1, 22: 1, 24: 1}, 6375 brighter /
+# 6182 darker; golden_diff.py compare --tiles 3 rc 0, max_delta r 24 g 22 b 18, changed_frac
+# 0.025157 (changed channels / all channels). software 3cefc2f0 -> f0b03b88; software leg only (no
+# sha256_hwrt key). Command, from D:\wt\ibl1: the values were set BY HAND from the verify sweep's
+# new_hashes.tsv (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md section 6), not with
+# scripts\golden.ps1 -Bless; each is the sha256 of the BMP that PIN_TREE=D:/wt/ibl1 python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py grand_showcase_2mat_fxaa software <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered (the sweep driver
+# D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier records of this pin stay as history;
+# the line directly above sha256_software names this bless.
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_aa_pin_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat_fxaa.bmp"
 width           = 512
 height          = 512
-# Re-blessed at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frame, rendered on C8b 38ac3ec5.
-sha256_software = "3cefc2f053e92c0a00826d5d039cc3785b6cecd69cca3700779c8661bf07c155"
+# Re-blessed at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frame, rendered on C8b 38ac3ec5. Superseded by IBL1 C4 (next line): that frame hashes to the old value, software 3cefc2f0.
+# Re-blessed at render lane IBL1 C4 under the Khronos PBR Neutral default (rulings 116 + 121 + 122): the verify sweep's frame, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/grand_showcase_2mat_fxaa_software.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "f0b03b888497be9b2a0f8828b70a51db7bb36cc346bee86ec5f0b1ab425d649d"
 
 [grand_showcase_2mat_fxaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1852,14 +2138,41 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
 # pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
 # 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69); re-blessed at PX1a C14 (on 031aae18) at the HDR lit.
+#
+# IBL1 P1 MOVED THESE BYTES BY 12575 PIXELS AT <= 15/255 (render lane u/render-ibl1, P1 C1-C3
+# 031c0e2c / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host under
+# the Khronos PBR Neutral default from the verify sweep's frames, rendered on C3 e84fb926 -- the
+# review fix round to 8e652f61 (comments and tests only, no .spv) moves no pixel; rulings 121 +
+# 122). Reason: IBL1 P1: oct16 normal + the oct8 tie removed (verify M1); rulings 121 + 122. gNormal
+# is now oct16 in R16G16_UNORM, not oct8 in RGBA8 (R16G16_UNORM storage + colour attachment is a
+# REQUIRED boot row), and the 16-bit material id rides gAlbedo.A (low byte) / gMaterial.A (high
+# byte), an exact round trip, so the resolve's decoded normal changes on every lit Deferred pixel:
+# the oct8 error (0.335 deg mean / 0.942 deg max, measured; the IBL1 cut, D-P1) and the tilt the
+# device's round-down .5 tie gave flat surfaces are gone; here the same five-sphere scene through
+# SMAA, by up to 15 codes on the specular rims only (ruling 122). The look is signed by ruling 122,
+# on the verify sweep's sheet (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved set is exactly
+# the 21 predicted Deferred legs, 0 class-Z movers, no background pixel moves (test_r1.md section 6;
+# ruling 122) -- software: 12575 of 262144 px changed (4.7970 %), 11284 of them by exactly 1 code;
+# max |d| 15 (5 px at the max), delta histogram {1: 11284, 2: 877, 3: 205, 4: 106, 5: 47, 6: 12, 7:
+# 10, 8: 12, 9: 8, 10: 1, 11: 4, 12: 3, 13: 1, 15: 5}, 6329 brighter / 6130 darker; golden_diff.py
+# compare --tiles 3 rc 0, max_delta r 15 g 13 b 15, changed_frac 0.024790 (changed channels / all
+# channels). software 4d65b845 -> 05d736c0; software leg only (no sha256_hwrt key). Command, from
+# D:\wt\ibl1: the values were set BY HAND from the verify sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md section 6), not with scripts\golden.ps1
+# -Bless; each is the sha256 of the BMP that PIN_TREE=D:/wt/ibl1 python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py grand_showcase_2mat_smaa software <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered (the sweep driver
+# D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier records of this pin stay as history;
+# the line directly above sha256_software names this bless.
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_aa_pin_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat_smaa.bmp"
 width           = 512
 height          = 512
-# Re-blessed at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frame, rendered on C8b 38ac3ec5.
-sha256_software = "4d65b8451da8ea7085f4de4ac1f4ce2f1987530356d29ed42e99f8eaf52a2d59"
+# Re-blessed at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frame, rendered on C8b 38ac3ec5. Superseded by IBL1 C4 (next line): that frame hashes to the old value, software 4d65b845.
+# Re-blessed at render lane IBL1 C4 under the Khronos PBR Neutral default (rulings 116 + 121 + 122): the verify sweep's frame, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/grand_showcase_2mat_smaa_software.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "05d736c0ecd0e5b0b5697b9cc42e245376d410f2559d33a9978ba02f56ae4bda"
 
 [grand_showcase_2mat_smaa.env]
 BOYKO_DISABLE_VALIDATION = "1"
@@ -1875,14 +2188,41 @@ RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 # ONLY: the AA passes read `lit`, the hwrt difference is upstream of them and is held by the AA-off
 # pins, so there is no sha256_hwrt key and the sweeps skip -Hwrt here. Blessed at GL-H0 step 6 (on
 # 72ee9f15) after the owner's visual sign-off of 2026-10-18 (orchestrator ruling 69); re-blessed at PX1a C14 (on 031aae18) at the HDR lit.
+#
+# IBL1 P1 MOVED THESE BYTES BY 9691 PIXELS AT <= 10/255 (render lane u/render-ibl1, P1 C1-C3
+# 031c0e2c / 4564e9e8 / e84fb926 on the trunk 02f9e1e7; re-blessed 2026-10-25 on the msvc host under
+# the Khronos PBR Neutral default from the verify sweep's frames, rendered on C3 e84fb926 -- the
+# review fix round to 8e652f61 (comments and tests only, no .spv) moves no pixel; rulings 121 +
+# 122). Reason: IBL1 P1: oct16 normal + the oct8 tie removed (verify M1); rulings 121 + 122. gNormal
+# is now oct16 in R16G16_UNORM, not oct8 in RGBA8 (R16G16_UNORM storage + colour attachment is a
+# REQUIRED boot row), and the 16-bit material id rides gAlbedo.A (low byte) / gMaterial.A (high
+# byte), an exact round trip, so the resolve's decoded normal changes on every lit Deferred pixel:
+# the oct8 error (0.335 deg mean / 0.942 deg max, measured; the IBL1 cut, D-P1) and the tilt the
+# device's round-down .5 tie gave flat surfaces are gone; here the same five-sphere scene through
+# the 2x SSAA, by up to 10 codes on the specular rims only (ruling 122). The look is signed by
+# ruling 122, on the verify sweep's sheet (D:/tmp/render-orch/ibl1/sweep/p1_sheet.png): the moved
+# set is exactly the 21 predicted Deferred legs, 0 class-Z movers, no background pixel moves
+# (test_r1.md section 6; ruling 122) -- software: 9691 of 262144 px changed (3.6968 %), 9221 of them
+# by exactly 1 code; max |d| 10 (3 px at the max), delta histogram {1: 9221, 2: 332, 3: 86, 4: 24,
+# 5: 8, 6: 8, 7: 4, 8: 3, 9: 2, 10: 3}, 5205 brighter / 4436 darker; golden_diff.py compare --tiles
+# 3 rc 0, max_delta r 9 g 8 b 10, changed_frac 0.017356 (changed channels / all channels). software
+# ed68624b -> 3e147023; software leg only (no sha256_hwrt key). Command, from D:\wt\ibl1: the values
+# were set BY HAND from the verify sweep's new_hashes.tsv
+# (D:/tmp/render-orch/ibl1/sweep/new_hashes.tsv; test_r1.md section 6), not with scripts\golden.ps1
+# -Bless; each is the sha256 of the BMP that PIN_TREE=D:/wt/ibl1 python -I
+# D:/tmp/render-orch/px1b/scratch/pin_by_hand.py grand_showcase_2mat_ssaa software <out.bmp>
+# CARGO_TARGET_DIR=D:/wt/_targets/ci-msvc rendered (the sweep driver
+# D:/tmp/render-orch/ibl1/sweep/sweep_nolock.py). The earlier records of this pin stay as history;
+# the line directly above sha256_software names this bless.
 crate           = "boyko-app"
 test_binary     = "grand_showcase_2mat"
 test_name       = "grand_showcase_2mat_aa_pin_dump"
 bmp             = "D:\\tmp\\grand_showcase_2mat_ssaa.bmp"
 width           = 512
 height          = 512
-# Re-blessed at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frame, rendered on C8b 38ac3ec5.
-sha256_software = "ed68624bf3669f80bd2c6077b267ff0cdd5d3765ca6bf6af85575f654d9125a9"
+# Re-blessed at render wave PXt C10 under the Khronos PBR Neutral default (rulings 116 + 119): GL-H3 h3n's frame, rendered on C8b 38ac3ec5. Superseded by IBL1 C4 (next line): that frame hashes to the old value, software ed68624b.
+# Re-blessed at render lane IBL1 C4 under the Khronos PBR Neutral default (rulings 116 + 121 + 122): the verify sweep's frame, rendered on C3 e84fb926 (D:/tmp/render-orch/ibl1/sweep/A/grand_showcase_2mat_ssaa_software.bmp); IBL1 P1: oct16 normal + the oct8 tie removed (verify M1).
+sha256_software = "3e1470238d56f2b05ad0caf52471a83b0027229b0342725e4b77c5a0455f720a"
 
 [grand_showcase_2mat_ssaa.env]
 BOYKO_DISABLE_VALIDATION = "1"

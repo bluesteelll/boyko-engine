@@ -85,6 +85,7 @@ use boyko_rhi_vulkan::ddgi::{
 };
 use boyko_rhi_vulkan::device::{InstanceConfig, VulkanContext};
 use boyko_rhi_vulkan::memory::BoundBuffer;
+use boyko_rhi_vulkan::present::GBUFFER_MRT_COLOR_FORMATS;
 use boyko_rhi_vulkan::rhi_impl::{
     ComputePipeline, VulkanBindGroup, VulkanBindGroupLayout, VulkanGraphicsPipeline,
     VulkanSampler,
@@ -222,10 +223,9 @@ const WM_KEYDOWN: u32 = 0x0100;
 /// The virtual-key code for the 'B' key (`0x42`) — the brick A/B toggle.
 const VK_B: usize = 0x42;
 
-/// The mesh-raster G-buffer color format (Render P5-r0). MUST equal the recorder's
-/// `GBUFFER_FORMAT` (`R8G8B8A8_UNORM`) so the mesh-MRT producer pipeline's 3 declared
-/// color formats match the bound albedo/normal/material attachments.
-const RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
+// The mesh-raster G-buffer color formats (Render P5-r0) are `GBUFFER_MRT_COLOR_FORMATS`, the
+// array the recorder's albedo / normal / material rings are created from (IBL1 P1: the normal is
+// R16G16_UNORM), so the mesh-MRT producer pipeline's 3 declared formats match the bound attachments.
 
 const VERTEX_STRIDE: u32 = core::mem::size_of::<Vertex>() as u32;
 const _: () = assert!(VERTEX_STRIDE == 40, "Vertex must be tightly packed at 40 bytes");
@@ -252,7 +252,7 @@ static MRT_VS_SPV: SpirvBlob<4480> = SpirvBlob(*include_bytes!(concat!(
 /// Render P5-r0: the mesh-MRT G-buffer PRODUCER fragment SPIR-V (`gbuffer_mrt.fs.spv`):
 /// writes albedo/normal/material as 3 MRT in the marcher's exact encoding (mask=1) + the
 /// marcher-aligned `SV_Depth` (euclidean under perspective, axial under ortho).
-static MRT_FS_SPV: SpirvBlob<3132> = SpirvBlob(*include_bytes!(concat!(
+static MRT_FS_SPV: SpirvBlob<3080> = SpirvBlob(*include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/shaders/gbuffer_mrt.fs.spv"
 )));
@@ -2127,7 +2127,7 @@ fn body_windowed_gbuffer_composite(bp: BootPresent<'_, '_>) {
             fragment_entry: c"main",
             // Render P5-r0: 3 MRT color formats = the G-buffer RGBA8 lanes; the production
             // `record_gbuffer` binds albedo/normal/material as the 3 MRT attachments.
-            color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+            color_formats: &GBUFFER_MRT_COLOR_FORMATS,
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {
@@ -3292,7 +3292,7 @@ fn body_p0_coarse_cull(bp: BootPresent<'_, '_>) {
             fragment_entry: c"main",
             // Render P5-r0: 3 MRT color formats = the G-buffer RGBA8 lanes; the production
             // `record_gbuffer` binds albedo/normal/material as the 3 MRT attachments.
-            color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+            color_formats: &GBUFFER_MRT_COLOR_FORMATS,
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {
@@ -8204,7 +8204,7 @@ fn run_showcase_body_ddgi(
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+            color_formats: &GBUFFER_MRT_COLOR_FORMATS,
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {
@@ -9518,7 +9518,7 @@ fn run_showcase_body(
             vertex_entry: c"main",
             fragment_module: &fs,
             fragment_entry: c"main",
-            color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+            color_formats: &GBUFFER_MRT_COLOR_FORMATS,
             depth_format: Some(Format::D32Sfloat),
             topology: PrimitiveTopology::TriangleList,
             vertex_layout: Some(VertexBufferLayout {

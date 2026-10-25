@@ -1329,8 +1329,15 @@ pub struct ShadowVisActivation<'a> {
     pub resolve_layout: &'a VulkanBindGroupLayout,
     /// The à-trous filter pipeline (`shadow_atrous.comp` / [`crate::compute::shadow_atrous_spirv`]),
     /// its layout declares [`Self::atrous_layout`] at set 0 + the 4-byte `{ uint step; }` COMPUTE
-    /// push. Dispatched once per level (ping-pong between `shadow_vis` / `shadow_vis2`).
+    /// push. Dispatched once per level (ping-pong between `shadow_vis` / `shadow_vis2`). The
+    /// DEFERRED chain's module: @2 declares the R16G16_UNORM G-buffer `gNormal` (IBL1 P1).
     pub atrous_pipeline: &'a ComputePipeline,
+    /// IBL1 P1 (critique C1): the VisibilityBuffer split's à-trous twin
+    /// (`shadow_atrous_vb.comp` / [`crate::compute::shadow_atrous_vb_spirv`]) on the SAME
+    /// [`Self::atrous_layout`] — @2 declares the R8G8B8A8_UNORM `gThinNormal`, the image the
+    /// split's à-trous sets bind there. The VB recorder dispatches this one, never
+    /// [`Self::atrous_pipeline`].
+    pub atrous_pipeline_thin: &'a ComputePipeline,
     /// The DEDICATED 6-binding à-trous bind-group LAYOUT { `gVisIn` STORAGE image @0 (R), `gVisOut`
     /// STORAGE image @1 (W), `gNormal` STORAGE image @2, `gViewT` STORAGE image @3, the
     /// `ResolvedShadowDenoise` UNIFORM buffer @4, the camera UNIFORM buffer @5 } — matching
@@ -2064,11 +2071,11 @@ pub struct MaterialUploadProbe {
 pub struct GBufferScene<'a> {
     /// The mesh-raster graphics pipeline (pass A). Render P5-r0: a 3-MRT G-buffer
     /// PRODUCER — the fronto-parallel quad is drawn into the D32 depth image AND the three
-    /// RGBA8 G-buffer color attachments (albedo@0, normal@1, material@2) in the marcher's
+    /// G-buffer color attachments (albedo@0, normal@1, material@2) in the marcher's
     /// exact encoding (mask=1). The caller MUST build it with `color_formats =
-    /// [R8G8B8A8_UNORM; 3]` + 3 per-target blend states (W2-b) and the new
-    /// `gbuffer_mrt.{vs,fs}` shader pair. (Pre-P5 it was a depth-only prepass with one
-    /// throwaway color format.)
+    /// GBUFFER_MRT_COLOR_FORMATS` (RGBA8 / RG16 / RGBA8 since IBL1 P1) + 3 per-target
+    /// blend states (W2-b) and the new `gbuffer_mrt.{vs,fs}` shader pair. (Pre-P5 it was a
+    /// depth-only prepass with one throwaway color format.)
     pub raster_pipeline: &'a VulkanGraphicsPipeline,
     /// The mesh quad's host-visible vertex buffer (position + color).
     pub vertex_buffer: &'a BoundBuffer,

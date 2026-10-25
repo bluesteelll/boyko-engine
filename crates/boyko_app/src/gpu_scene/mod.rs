@@ -77,7 +77,8 @@ use boyko_rhi_vulkan::present::gpu_zone::{
     GPU_RING_DEPTH, GpuZoneRecorder, PairResult, QUERIES_PER_SLOT, RetireScratch, RetiredFrame,
 };
 use boyko_rhi_vulkan::present::{
-    CullMembers, HzbPlan, LIT_FORMAT, MeshFacePipelines, SdfDepthMergeActivation, VB_CULL_OCC_ARMED, VbOcclusionArm,
+    CullMembers, GBUFFER_MRT_COLOR_FORMATS, HzbPlan, LIT_FORMAT, MeshFacePipelines, SdfDepthMergeActivation,
+    VB_CULL_OCC_ARMED, VbOcclusionArm, gbuffer_mrt_color_formats_with,
 };
 use boyko_rhi_vulkan::present::transparent_depth::{
     TRANSPARENT_CLASS_PARTICLES, TransparentDepthCapability,
@@ -105,7 +106,7 @@ use boyko_rhi_vulkan::compute::{
     BUILD_TLAS_INSTANCES_PUSH_BYTES, build_tlas_instances_spirv, deferred_pbr_denoised_spirv,
     deferred_pbr_hwrt_spirv, deferred_pbr_vis_mv_spirv, deferred_pbr_vis_spirv,
     gbuffer_mrt_mv_fs_spirv, gbuffer_mrt_mv_vs_spirv, gbuffer_mrt_mvpm_fs_spirv,
-    gbuffer_mrt_mvpm_vs_spirv, shadow_atrous_spirv, shadow_temporal_spirv, vb_geo_mv_spirv,
+    gbuffer_mrt_mvpm_vs_spirv, shadow_atrous_spirv, shadow_atrous_vb_spirv, shadow_temporal_spirv, vb_geo_mv_spirv,
     vb_shade_split_hwrt_spirv, vb_shade_split_tex_hwrt_spirv, vb_shadow_vis_spirv,
 };
 #[cfg(feature = "hwrt")]
@@ -606,10 +607,6 @@ const _: () = assert!(
     "invariant: InstanceModelCol is 48 bytes (the R2a-3 packer reads it verbatim)"
 );
 
-/// The mesh-raster G-buffer color format — MUST equal the recorder's
-/// `GBUFFER_FORMAT` (`R8G8B8A8_UNORM`), the same pin the showcase carries.
-const RASTER_COLOR_FORMAT: Format = Format::R8G8B8A8Unorm;
-
 /// Textured-PBR T6c: the `gPbr` 4th MRT color format the TEXTURED raster pipeline declares
 /// — MUST equal `GBufferTargets`'s `gPbr` ring format (T6a's `R16G16B16A16_SFLOAT`).
 const TEX_GPBR_COLOR_FORMAT: Format = Format::R16G16B16A16Sfloat;
@@ -1101,12 +1098,15 @@ pub(crate) struct GpuSceneBundles {
     #[cfg(feature = "hwrt")]
     shadow_denoise_pipelines:
         Option<(ComputePipeline, ComputePipeline, VulkanBindGroupLayout)>,
-    /// HW-RT rung 3a: the à-trous spatial-denoise filter pipeline (`shadow_atrous.comp`) + its
-    /// DEDICATED 6-binding layout { `gVisIn` @0, `gVisOut` @1, `gNormal` @2, `gViewT` @3, the
-    /// `ResolvedShadowDenoise` UBO @4, the camera UBO @5 } + a 4-byte `{ uint step; }` push. Built at
-    /// boot under the SAME gate as [`Self::shadow_denoise_pipelines`]; `None` otherwise.
+    /// HW-RT rung 3a: the à-trous spatial-denoise filter pipelines + their SHARED DEDICATED
+    /// 6-binding layout { `gVisIn` @0, `gVisOut` @1, the normal @2, `gViewT` @3, the
+    /// `ResolvedShadowDenoise` UBO @4, the camera UBO @5 } + a 4-byte `{ uint step; }` push, as
+    /// `(deferred, vb_thin, layout)`. IBL1 P1 (critique C1): the Deferred chain binds the RG16
+    /// G-buffer `gNormal` at @2 and the VB split the RGBA8 `thin_normal`, so each has its own
+    /// module (`shadow_atrous.comp` / `shadow_atrous_vb.comp`) on the one layout. Built at boot
+    /// under the SAME gate as [`Self::shadow_denoise_pipelines`]; `None` otherwise.
     #[cfg(feature = "hwrt")]
-    shadow_atrous_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)>,
+    shadow_atrous_pipeline: Option<(ComputePipeline, ComputePipeline, VulkanBindGroupLayout)>,
     /// HW-RT Rung 3b step 6: the temporal reproject compute pipeline (`shadow_temporal.comp`) + its
     /// DEDICATED 8-binding layout { `gVisIn` @0, `gMotionVec` @1, `gViewT` @2, `gHistIn` @3, `gHistOut`
     /// @4, `gTemporalOut` @5 STORAGE images, the `ResolvedTemporalShadow` UBO @6, the camera UBO @7 } +
@@ -2113,7 +2113,7 @@ impl GpuSceneBundles {
                 vertex_entry: c"main",
                 fragment_module: &fs,
                 fragment_entry: c"main",
-                color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+                color_formats: &GBUFFER_MRT_COLOR_FORMATS,
                 depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: Some(VertexBufferLayout {
@@ -2168,7 +2168,7 @@ impl GpuSceneBundles {
                 vertex_entry: c"main",
                 fragment_module: &pm_fs,
                 fragment_entry: c"main",
-                color_formats: &[RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT, RASTER_COLOR_FORMAT],
+                color_formats: &GBUFFER_MRT_COLOR_FORMATS,
                 depth_format: Some(Format::D32Sfloat),
                 topology: PrimitiveTopology::TriangleList,
                 vertex_layout: Some(VertexBufferLayout {
@@ -2502,11 +2502,13 @@ impl GpuSceneBundles {
             (vis_pipeline, denoised_pipeline, denoise_layout)
         });
 
-        // ── HW-RT rung 3a: the à-trous filter pipeline + its 6-binding layout { `gVisIn` @0,
-        // `gVisOut` @1, `gNormal` @2, `gViewT` @3, the `ResolvedShadowDenoise` UBO @4, the camera
-        // UBO @5 } + a 4-byte `{ uint step }` COMPUTE push. Same `ray_query_enabled` gate.
+        // ── HW-RT rung 3a: the à-trous filter pipelines + their 6-binding layout { `gVisIn` @0,
+        // `gVisOut` @1, the normal @2, `gViewT` @3, the `ResolvedShadowDenoise` UBO @4, the camera
+        // UBO @5 } + a 4-byte `{ uint step }` COMPUTE push. Same `ray_query_enabled` gate. IBL1 P1:
+        // two modules on the one layout — the Deferred chain's (@2 = the RG16 `gNormal`) and the
+        // VB split's twin (@2 = the RGBA8 `gThinNormal`), each matching the view its sets bind.
         #[cfg(feature = "hwrt")]
-        let shadow_atrous_pipeline: Option<(ComputePipeline, VulkanBindGroupLayout)> =
+        let shadow_atrous_pipeline: Option<(ComputePipeline, ComputePipeline, VulkanBindGroupLayout)> =
             ctx.ray_query_enabled().then(|| {
                 let atrous_layout = RhiDevice::create_bind_group_layout(
                     device,
@@ -2522,23 +2524,28 @@ impl GpuSceneBundles {
                     },
                 )
                 .expect("invariant: rung-3a à-trous bind-group layout create");
-                let atrous_cs = RhiDevice::create_shader_module(device, shadow_atrous_spirv())
-                    .expect("invariant: rung-3a à-trous compute shader module create");
-                let atrous_pipeline = RhiDevice::create_compute_pipeline(
-                    device,
-                    &ComputePipelineDesc {
-                        module: &atrous_cs,
-                        entry: c"main",
-                        push_constant_bytes: SHADOW_ATROUS_PUSH_BYTES,
-                        bind_group_layout: Some(&atrous_layout),
-                        spec_constants: &[],
-                    },
-                )
-                .expect("invariant: rung-3a à-trous compute pipeline create");
-                // SAFETY: the module was created on `device` and is consumed by the pipeline create;
-                // destroy it once; no GPU work is in flight yet.
-                unsafe { RhiDevice::destroy_shader_module(device, atrous_cs) };
-                (atrous_pipeline, atrous_layout)
+                let build_atrous = |spirv: &[u32]| {
+                    let atrous_cs = RhiDevice::create_shader_module(device, spirv)
+                        .expect("invariant: rung-3a à-trous compute shader module create");
+                    let atrous_pipeline = RhiDevice::create_compute_pipeline(
+                        device,
+                        &ComputePipelineDesc {
+                            module: &atrous_cs,
+                            entry: c"main",
+                            push_constant_bytes: SHADOW_ATROUS_PUSH_BYTES,
+                            bind_group_layout: Some(&atrous_layout),
+                            spec_constants: &[],
+                        },
+                    )
+                    .expect("invariant: rung-3a à-trous compute pipeline create");
+                    // SAFETY: the module was created on `device` and is consumed by the pipeline
+                    // create; destroy it once; no GPU work is in flight yet.
+                    unsafe { RhiDevice::destroy_shader_module(device, atrous_cs) };
+                    atrous_pipeline
+                };
+                let atrous_pipeline = build_atrous(shadow_atrous_spirv());
+                let atrous_pipeline_thin = build_atrous(shadow_atrous_vb_spirv());
+                (atrous_pipeline, atrous_pipeline_thin, atrous_layout)
             });
 
         // ── HW-RT Rung 3b step 6: the temporal reproject pipeline + its 8-binding layout { `gVisIn`
@@ -3857,12 +3864,7 @@ impl GpuSceneBundles {
                         vertex_entry: c"main",
                         fragment_module: &mv_fs,
                         fragment_entry: c"main",
-                        color_formats: &[
-                            RASTER_COLOR_FORMAT,
-                            RASTER_COLOR_FORMAT,
-                            RASTER_COLOR_FORMAT,
-                            Format::R16G16Sfloat,
-                        ],
+                        color_formats: &gbuffer_mrt_color_formats_with(Format::R16G16Sfloat),
                         depth_format: Some(Format::D32Sfloat),
                         topology: PrimitiveTopology::TriangleList,
                         vertex_layout: Some(VertexBufferLayout {
@@ -4064,12 +4066,7 @@ impl GpuSceneBundles {
                         vertex_entry: c"main",
                         fragment_module: &mvpm_fs,
                         fragment_entry: c"main",
-                        color_formats: &[
-                            RASTER_COLOR_FORMAT,
-                            RASTER_COLOR_FORMAT,
-                            RASTER_COLOR_FORMAT,
-                            Format::R16G16Sfloat,
-                        ],
+                        color_formats: &gbuffer_mrt_color_formats_with(Format::R16G16Sfloat),
                         depth_format: Some(Format::D32Sfloat),
                         topology: PrimitiveTopology::TriangleList,
                         vertex_layout: Some(VertexBufferLayout {
@@ -5176,12 +5173,7 @@ impl GpuSceneBundles {
                     // 3 base G-buffer attachments + the 4th `gPbr` (T6a) — always 4 color
                     // formats declared; the recorder's `color_attachment_count` matches the
                     // bound rendering scope (4 on every TEXTURED frame, W2-b).
-                    color_formats: &[
-                        RASTER_COLOR_FORMAT,
-                        RASTER_COLOR_FORMAT,
-                        RASTER_COLOR_FORMAT,
-                        TEX_GPBR_COLOR_FORMAT,
-                    ],
+                    color_formats: &gbuffer_mrt_color_formats_with(TEX_GPBR_COLOR_FORMAT),
                     depth_format: Some(Format::D32Sfloat),
                     topology: PrimitiveTopology::TriangleList,
                     vertex_layout: Some(VertexBufferLayout {
@@ -6817,12 +6809,13 @@ impl GpuSceneBundles {
                 self.shadow_denoise_pipelines.as_ref().zip(self.shadow_atrous_pipeline.as_ref())
             })
             .flatten()
-            .map(|((vis_pipeline, denoised_pipeline, resolve_layout), (atrous_pipeline, atrous_layout))| {
+            .map(|((vis_pipeline, denoised_pipeline, resolve_layout), (atrous_pipeline, atrous_pipeline_thin, atrous_layout))| {
                 ShadowVisActivation {
                     vis_pipeline,
                     denoised_pipeline,
                     resolve_layout,
                     atrous_pipeline,
+                    atrous_pipeline_thin,
                     atrous_layout,
                     atrous_levels,
                     final_is_vis2: atrous_levels % 2 == 1,
@@ -7221,7 +7214,7 @@ impl GpuSceneBundles {
             atrous_layout_denoise_hwrt: self
                 .shadow_atrous_pipeline
                 .as_ref()
-                .map(|(_, layout)| layout),
+                .map(|(_, _, layout)| layout),
             #[cfg(feature = "hwrt")]
             shadow_denoise_enabled: denoise_armed,
             #[cfg(feature = "hwrt")]
@@ -8321,8 +8314,9 @@ impl GpuSceneBundles {
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
             }
             #[cfg(feature = "hwrt")]
-            if let Some((pipeline, layout)) = self.shadow_atrous_pipeline {
+            if let Some((pipeline, pipeline_thin, layout)) = self.shadow_atrous_pipeline {
                 RhiDevice::destroy_compute_pipeline(ctx, pipeline);
+                RhiDevice::destroy_compute_pipeline(ctx, pipeline_thin);
                 RhiDevice::destroy_bind_group_layout(ctx, layout);
             }
             // HW-RT Rung 3b step 6: the temporal reproject pipeline + its 8-binding layout,

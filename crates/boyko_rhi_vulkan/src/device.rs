@@ -160,7 +160,8 @@ pub enum BootError {
     /// Render wave PX1a (AD-1): the chosen GPU's OPTIMAL tiling of a format every boot creates
     /// lacks a capability the engine uses — a row of `REQUIRED_FORMATS`, the single source for
     /// the query and this refusal (`lit`, the HDR scene colour: sampled, storage, a blended colour
-    /// attachment, linearly filtered). Checked before `vkCreateDevice`, so a device without it
+    /// attachment, linearly filtered; IBL1 P1's `gNormal`: storage and a colour attachment).
+    /// Checked before `vkCreateDevice`, so a device without it
     /// gets this named refusal instead of an image-create fault or an unblendable attachment.
     RequiredFormatMissing {
         /// The row's name (e.g. `"lit: R16G16B16A16_SFLOAT"`).
@@ -271,7 +272,8 @@ pub struct DeviceCaps {
     pub viewt_storage_format_ok: bool,
     /// Whether `R8G8B8A8_UNORM` supports `COLOR_ATTACHMENT` under OPTIMAL tiling (Render
     /// P5-r0: the mesh raster pass A writes the G-buffer color images as MRT color
-    /// attachments). Always `true` on a booted context — boot fails with
+    /// attachments — albedo / material; the `R16G16_UNORM` normal is a `REQUIRED_FORMATS` row
+    /// since IBL1 P1). Always `true` on a booted context — boot fails with
     /// [`BootError::GbufferColorAttachmentFormatUnsupported`] otherwise.
     pub gbuffer_color_attachment_format_ok: bool,
     /// Whether `R8_UNORM` supports `STORAGE_IMAGE` under OPTIMAL tiling (Render P7: the SSAO
@@ -1233,7 +1235,8 @@ impl VulkanContext {
         if !device_caps.viewt_storage_format_ok {
             fail!(BootError::ViewtStorageFormatUnsupported);
         }
-        // Render P5-r0: the mesh raster pass A writes the R8G8B8A8_UNORM G-buffer images as
+        // Render P5-r0: the mesh raster pass A writes the R8G8B8A8_UNORM G-buffer images (albedo /
+        // material; the R16G16_UNORM normal is a REQUIRED_FORMATS row, IBL1 P1) as
         // MRT COLOR attachments — fail-fast here (mirroring the storage checks) so the
         // producer can never device-lost on an unsupported usage. RGBA8_UNORM
         // color-attachment renderability is mandatory in Vulkan (core-guaranteed on the RTX).
@@ -3413,15 +3416,32 @@ pub(crate) struct RequiredFormat {
 ///   sky, SSAA's `lit_native`) and BLENDED (the additive particle draw). All five are mandatory for
 ///   `R16G16B16A16_SFLOAT` in Vulkan, so this row refuses no conformant device; it exists so the
 ///   format the engine cannot run without is checked instead of assumed.
-pub(crate) const REQUIRED_FORMATS: [RequiredFormat; 1] = [RequiredFormat {
-    name: "lit: R16G16B16A16_SFLOAT",
-    vk_format: crate::present::LIT_FORMAT.as_i32(),
-    bits: VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
-        | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
-        | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
-        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
-        | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
-}];
+/// * `gNormal` — the Deferred G-buffer normal (IBL1 P1: oct16 in `R16G16_UNORM`, verify M1). Storage
+///   (the composite's store, the resolve / SSAO / à-trous loads) and a colour attachment (the mesh
+///   raster's MRT@1). Neither bit is in the spec's mandatory table for this format, so both are
+///   probed; every Vulkan 1.3 desktop part advertises them.
+pub(crate) const REQUIRED_FORMATS: [RequiredFormat; 2] = [
+    RequiredFormat {
+        name: "lit: R16G16B16A16_SFLOAT",
+        vk_format: crate::present::LIT_FORMAT.as_i32(),
+        bits: VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT
+            | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT
+            | VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT
+            | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+            | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT,
+    },
+    RequiredFormat {
+        name: "gNormal: R16G16_UNORM",
+        vk_format: crate::present::GNORMAL_FORMAT.as_i32(),
+        bits: VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT,
+    },
+];
+
+// The gNormal row's name spells `GNORMAL_FORMAT`; a flip of the constant must rename the row too.
+const _: () = assert!(
+    matches!(crate::present::GNORMAL_FORMAT, boyko_rhi::Format::R16G16Unorm),
+    "GNORMAL_FORMAT moved: rename REQUIRED_FORMATS' gNormal row (and its bits) with it"
+);
 
 // The lit row's name spells `LIT_FORMAT`; a flip of the constant must rename the row too.
 const _: () = assert!(
@@ -5121,10 +5141,11 @@ mod required_format_tests {
         | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
         | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
 
-    /// A fake device whose OPTIMAL tiling of RGBA16F holds `rgba16f_bits` and of every other
-    /// format holds nothing — so a check that queried the wrong format would refuse.
+    /// A fake device whose OPTIMAL tiling of RGBA16F holds `rgba16f_bits`, of RG16_UNORM exactly the
+    /// `gNormal` row's bits, and of every other format nothing — so a check that queried the wrong
+    /// format would refuse, and the lit-row tests stay about the lit row.
     fn device_with(rgba16f_bits: VkFlags) -> impl Fn(i32) -> VkFlags {
-        move |vk_format| if vk_format == RGBA16F { rgba16f_bits } else { 0 }
+        device_with_rows(rgba16f_bits, ALL_GNORMAL_BITS)
     }
 
     #[test]
@@ -5162,11 +5183,51 @@ mod required_format_tests {
         assert_eq!(missing_required_format(device_with(ALL_LIT_BITS & !two)), Some((LIT_ROW, two)));
     }
 
+    /// `VK_FORMAT_R16G16_UNORM` (vulkan_core.h) — `gNormal`'s format since IBL1 P1.
+    const RG16_UNORM: i32 = 77;
+    const GNORMAL_ROW: &str = "gNormal: R16G16_UNORM";
+    /// The two capabilities the engine uses on `gNormal`: the composite's store and the mesh
+    /// raster's MRT@1.
+    const ALL_GNORMAL_BITS: VkFlags = VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+
+    /// A fake device holding `rgba16f_bits` on RGBA16F, `rg16_bits` on RG16_UNORM and nothing on any
+    /// other format.
+    fn device_with_rows(rgba16f_bits: VkFlags, rg16_bits: VkFlags) -> impl Fn(i32) -> VkFlags {
+        move |vk_format| match vk_format {
+            RGBA16F => rgba16f_bits,
+            RG16_UNORM => rg16_bits,
+            _ => 0,
+        }
+    }
+
+    /// IBL1 P1 T-N5: a device without `R16G16_UNORM` STORAGE or COLOR_ATTACHMENT under OPTIMAL
+    /// tiling is refused by name, with exactly the missing bits; a device with both boots. Both bits
+    /// are probed because the spec's mandatory table does not promise the colour attachment.
+    #[test]
+    fn gbuffer_normal_format_row_is_required() {
+        for bit in [VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT] {
+            assert_eq!(
+                missing_required_format(device_with_rows(ALL_LIT_BITS, ALL_GNORMAL_BITS & !bit)),
+                Some((GNORMAL_ROW, bit)),
+                "a device without bit {bit:#x} on R16G16_UNORM booted"
+            );
+        }
+        assert_eq!(
+            missing_required_format(device_with_rows(ALL_LIT_BITS, 0)),
+            Some((GNORMAL_ROW, ALL_GNORMAL_BITS)),
+            "a device with no R16G16_UNORM optimal-tiling support booted"
+        );
+        assert_eq!(missing_required_format(device_with_rows(ALL_LIT_BITS, ALL_GNORMAL_BITS)), None);
+    }
+
     /// The table, pinned to the spec's `VkFormat` / `VkFormatFeatureFlagBits` values rather than to
     /// the constants that spell them.
     #[test]
-    fn the_table_is_exactly_the_lit_row_on_rgba16f_with_its_five_bits() {
+    fn the_table_is_exactly_the_lit_and_gnormal_rows_with_their_bits() {
         let rows: Vec<(&str, i32, u32)> = REQUIRED_FORMATS.iter().map(|r| (r.name, r.vk_format, r.bits)).collect();
-        assert_eq!(rows, [(LIT_ROW, RGBA16F, 0x1 | 0x2 | 0x80 | 0x100 | 0x1000)]);
+        assert_eq!(
+            rows,
+            [(LIT_ROW, RGBA16F, 0x1 | 0x2 | 0x80 | 0x100 | 0x1000), (GNORMAL_ROW, RG16_UNORM, 0x2 | 0x80)]
+        );
     }
 }

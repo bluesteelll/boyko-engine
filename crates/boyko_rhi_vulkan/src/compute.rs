@@ -153,9 +153,9 @@ embed_spirv! {
     /// buffer @ binding 5 (written once). The edit-list stays a `StructuredBuffer` @
     /// binding 0.
     /// Render PBR MVP-2: the marcher repacks the G-buffer attributes — gAlbedo = the picked
-    /// material's RAW LINEAR `base_color` (from the material SSBO @ binding 7), gNormal =
-    /// (octahedral world normal in RG, 16-bit material id in BA), gMaterial = (shadow, ao,
-    /// mask). The material PICK is an argmin over the edit list reusing the FROZEN
+    /// material's RAW LINEAR `base_color` (from the material SSBO @ binding 7), gNormal = the
+    /// octahedral world normal (R16G16_UNORM since IBL1 P1), gMaterial = (shadow, ao, mask), the
+    /// 16-bit material id in the gAlbedo.A / gMaterial.A lanes (low / high byte). The material PICK is an argmin over the edit list reusing the FROZEN
     /// `load_edit`/`edit_distance` (a read-only attribution; the field is untouched, proven by
     /// the GATE-1 probe tripwire). Phase 0 also extracted ray-gen into the shared
     /// `ray_gen.hlsli`. The full Cook-Torrance shade runs in [`deferred_pbr_spirv`]. The byte
@@ -221,6 +221,8 @@ embed_spirv! {
     /// site; `m2_surface_hit` reports its cubic candidate; the per-ray latch) → 168152 bytes. The
     /// `brick_trilinear == 0` path executes the same single branch as before (the certificate is dead
     /// at run time when M2 is off; rule (xviii)'s register twin is `tests/marcher_occupancy.rs`).
+    /// IBL1 P1: `gNormal` is the R16G16_UNORM oct16 normal and the material id rides the albedo /
+    /// material alpha lanes (the mesh arm keeps the raster's id high byte) → 168124 bytes.
     SDF_GBUFFER_COMPOSITE_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/sdf_gbuffer_composite.comp.spv")
 }
@@ -239,8 +241,9 @@ embed_spirv! {
     ///
     /// Render PBR MVP-2: the resolve now runs FULL metallic-roughness Cook-Torrance (GGX D +
     /// height-correlated Smith V + Schlick F + Lambert diffuse + analytic EnvBRDFApprox
-    /// ambient) instead of `mask ? base*vis : base`. It reads gAlbedo (raw base), gNormal (oct
-    /// normal + 16-bit material id), gMaterial (shadow, ao, mask) @ bindings 0..2, fetches the
+    /// ambient) instead of `mask ? base*vis : base`. It reads gAlbedo (raw base + id low byte),
+    /// gNormal (the oct16 normal, IBL1 P1), gMaterial (shadow, ao, mask + id high byte) @
+    /// bindings 0..2, fetches the
     /// picked material from the SSBO @ binding 4, and reconstructs the per-pixel view direction
     /// from the camera UBO @ binding 5 + the shared `ray_gen.hlsli`. SDF (mask == 1) pixels get
     /// full PBR (the owner-acknowledged behavioral change, PBR plan call F); mesh / background /
@@ -423,10 +426,23 @@ embed_spirv! {
     /// normalized `Σ(w·vis)/Σw`. Bound to its OWN 6-binding layout { @0 `gVisIn` (RG read), @1
     /// `gVisOut` (RG write), @2 `gNormal`, @3 `gViewT`, @4 `ResolvedShadowDenoise` UBO (16 B,
     /// σ_z/σ_n), @5 the shared 80-byte Camera UBO }. Ping-ponged between the `shadow_vis` /
-    /// `shadow_vis2` targets, one dispatch per level.
+    /// `shadow_vis2` targets, one dispatch per level. The DEFERRED chain's module: @2 is the
+    /// R16G16_UNORM G-buffer normal (IBL1 P1); the VB split dispatches [`SHADOW_ATROUS_VB_SPV`].
     #[cfg(feature = "hwrt")]
     SHADOW_ATROUS_SPV,
     concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/shadow_atrous.comp.spv")
+}
+
+embed_spirv! {
+    /// IBL1 P1 (critique C1): the VisibilityBuffer split's twin of [`SHADOW_ATROUS_SPV`]
+    /// (`shaders/shadow_atrous_vb.comp.spv`, `shadow_atrous.comp.hlsl` with `-D VB_THIN=1`). The
+    /// SAME filter on the SAME 6-binding layout, except @2 declares `gThinNormal` (`rgba8`): the
+    /// split binds `vb_geo`'s R8G8B8A8_UNORM `thin_normal` there, and a storage image's declared
+    /// format must match its view. Its code is today's pre-P1 `shadow_atrous` module, the
+    /// variable's `OpName` aside.
+    #[cfg(feature = "hwrt")]
+    SHADOW_ATROUS_VB_SPV,
+    concat!(env!("CARGO_MANIFEST_DIR"), "/shaders/shadow_atrous_vb.comp.spv")
 }
 
 embed_spirv! {
@@ -684,7 +700,7 @@ embed_spirv! {
 // runtime by binding a different pipeline, NEVER by a dynamic loop bound, so every `[unroll]`
 // slice/step loop stays fully unrolled with ZERO per-pixel runtime cost). All three share the
 // IDENTICAL 5-binding SSAO interface (`shaders/sdf_ssao.comp.hlsl`, GROUP A): gNormal @0 (R,
-// oct + id), gMaterial @1 (R, `.b` = mask), gViewT @2 (R, surface `t`), the `ssao` out @3 (W), the
+// RG16 oct), gMaterial @1 (R, `.b` = mask), gViewT @2 (R, surface `t`), the `ssao` out @3 (W), the
 // 80-byte camera UBO @4 (`gAlbedo` is NOT bound) — so ONE bind-group layout drives all three. Each
 // `.spv` is a DISTINCT size (the baked-const unroll counts differ), so each is its own
 // `SpirvBlob<N>` `static` (a heterogeneous `[_; 3]` array would force a large-variant enum); the
@@ -1270,7 +1286,7 @@ embed_spirv! {
     /// Asset-streaming plan F8+ PER_INSTANCE_MATERIAL-variant mesh-MRT G-buffer PRODUCER
     /// fragment SPIR-V (`shaders/gbuffer_mrt_pm.fs.spv`, compiled from `gbuffer_mrt.fs.hlsl`
     /// with `-D PER_INSTANCE_MATERIAL=1`). Writes the SAME 3 attribute MRTs + `SV_Depth` as
-    /// [`GBUFFER_MRT_FS_SPV`], except `gNormal.BA` packs the REAL per-instance material id
+    /// [`GBUFFER_MRT_FS_SPV`], except the id lanes (`gAlbedo.A` / `gMaterial.A`) pack the REAL per-instance material id
     /// (forwarded flat from the VS, unchanged from F8) AND `gAlbedo` sources the
     /// per-instance material's `base_color` (owner: material-drives-albedo-too) instead of
     /// the mesh vertex color. Paired with [`gbuffer_mrt_pm_vs_spirv`]; the base
@@ -1302,7 +1318,7 @@ embed_spirv! {
     /// PRODUCER fragment SPIR-V (`shaders/gbuffer_mrt_mvpm.fs.spv`, compiled from
     /// `gbuffer_mrt.fs.hlsl` with BOTH `-D MOTION_VECTORS=1 -D PER_INSTANCE_MATERIAL=1`).
     /// Writes the SAME 3 attribute MRTs + `SV_Depth` as [`GBUFFER_MRT_FS_SPV`], PLUS the 4th
-    /// MRT `motion_vec` Δuv (like [`GBUFFER_MRT_MV_FS_SPV`]) AND sources `gAlbedo`/`gNormal.BA`
+    /// MRT `motion_vec` Δuv (like [`GBUFFER_MRT_MV_FS_SPV`]) AND sources `gAlbedo` and the id lanes
     /// from the forwarded per-instance material (like [`GBUFFER_MRT_PM_FS_SPV`]). Paired with
     /// [`gbuffer_mrt_mvpm_vs_spirv`]; the `gbuffer_mrt.fs.hlsl` source is UNTOUCHED by F8-mv —
     /// only the `-D` combination is new.
@@ -1716,6 +1732,15 @@ pub fn deferred_pbr_denoised_spirv() -> &'static [u32] {
 #[inline]
 pub fn shadow_atrous_spirv() -> &'static [u32] {
     SHADOW_ATROUS_SPV.as_words()
+}
+
+/// IBL1 P1: the VB split's à-trous twin ([`SHADOW_ATROUS_VB_SPV`]) as a `u32` word stream — the
+/// module whose @2 declares the RGBA8 `gThinNormal` the split binds there. Built on the SAME
+/// layout as [`shadow_atrous_spirv`]'s pipeline.
+#[cfg(feature = "hwrt")]
+#[inline]
+pub fn shadow_atrous_vb_spirv() -> &'static [u32] {
+    SHADOW_ATROUS_VB_SPV.as_words()
 }
 
 /// The SSAO à-trous denoise filter, INTERIOR pin (`r16`/`r16`), as a `u32` word stream. Bound to
@@ -2399,7 +2424,7 @@ pub fn gbuffer_mrt_pm_vs_spirv() -> &'static [u32] {
 
 /// Asset-streaming plan F8 PER_INSTANCE_MATERIAL-variant mesh-MRT gbuffer FRAGMENT SPIR-V as a
 /// `u32` word stream. Paired with [`gbuffer_mrt_pm_vs_spirv`]; packs the real per-instance
-/// material id into `gNormal.BA`.
+/// material id into the id lanes (`gAlbedo.A` / `gMaterial.A`, IBL1 P1).
 #[inline]
 pub fn gbuffer_mrt_pm_fs_spirv() -> &'static [u32] {
     GBUFFER_MRT_PM_FS_SPV.as_words()
@@ -2418,7 +2443,7 @@ pub fn gbuffer_mrt_mvpm_vs_spirv() -> &'static [u32] {
 
 /// F8-mv combined MOTION_VECTORS + PER_INSTANCE_MATERIAL mesh-MRT gbuffer FRAGMENT SPIR-V as a
 /// `u32` word stream. Paired with [`gbuffer_mrt_mvpm_vs_spirv`]; writes the 4th MRT
-/// `motion_vec` (`Δuv`) AND sources `gAlbedo`/`gNormal.BA` from the per-instance material.
+/// `motion_vec` (`Δuv`) AND sources `gAlbedo` and the id lanes from the per-instance material.
 #[cfg(feature = "hwrt")]
 #[inline]
 pub fn gbuffer_mrt_mvpm_fs_spirv() -> &'static [u32] {

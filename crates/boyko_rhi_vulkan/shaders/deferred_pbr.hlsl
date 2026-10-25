@@ -9,17 +9,18 @@
 // to MVP-1 (the 0%-gate).
 //
 //     base   = gAlbedo.rgb;                              // RAW LINEAR base color
-//     n      = oct_decode(gNormal.rg);                   // world normal (octahedral)
-//     id     = round(gNormal.b*255) | round(gNormal.a*255)<<8;  // 16-bit material id
+//     n      = oct_decode(gNormal.rg);                   // world normal (oct16, RG16)
+//     id     = round(gAlbedo.a*255) | round(gMaterial.a*255)<<8;  // 16-bit material id
 //     shadow = gMaterial.r;  ao = gMaterial.g;  mask = gMaterial.b > 0.5;
 //     m      = materials[id];                            // metallic/roughness/...
 //     lit    = mask ? cook_torrance(...) : base;         // STRICT if/select on mask
 //
 // # The resolve descriptor set (set 0 of the resolve pipeline — NOT the marcher's vocab)
 //
-//   binding 0 : RWTexture2D<float4> (STORAGE, rgba8) — gAlbedo   (read via `.Load`).
-//   binding 1 : RWTexture2D<float4> (STORAGE, rgba8) — gNormal   (oct + material id).
-//   binding 2 : RWTexture2D<float4> (STORAGE, rgba8) — gMaterial (shadow, ao, mask).
+//   binding 0 : RWTexture2D<float4> (STORAGE, rgba8) — gAlbedo   (base; id low byte in A).
+//   binding 1 : RWTexture2D<float2> (STORAGE, rg16)  — gNormal   (the oct16 normal, IBL1 P1).
+//   binding 2 : RWTexture2D<float4> (STORAGE, rgba8) — gMaterial (shadow, ao, mask; id high
+//               byte in A).
 //   binding 3 : RWTexture2D<float4> (STORAGE, rgba8) — gLit      (the LIT output, store).
 //   binding 4 : StructuredBuffer<MaterialGpu>        — the material table (read by id).
 //   binding 5 : cbuffer Camera (UNIFORM)             — the 80-byte extent/camera block
@@ -94,12 +95,13 @@
 
 static const float PI = 3.14159265358979323846;
 
-// bindings 0..3: the G-buffer + lit storage images. `[[vk::image_format("rgba8")]]` pins
-// each G-buffer `OpTypeImage` to `Rgba8` to match the R8G8B8A8_UNORM views; `gLit` names
-// `LIT_FORMAT_QUALIFIER` (render wave PX1a: the HDR scene colour, `lit_format.hlsli`).
+// bindings 0..3: the G-buffer + lit storage images. `[[vk::image_format]]` pins each G-buffer
+// `OpTypeImage` to its view: `Rgba8` for the R8G8B8A8_UNORM albedo / material, `Rg16` for the
+// R16G16_UNORM oct16 normal (IBL1 P1); `gLit` names `LIT_FORMAT_QUALIFIER` (render wave PX1a:
+// the HDR scene colour, `lit_format.hlsli`).
 #include "lit_format.hlsli"
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gAlbedo   : register(u0);
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gNormal   : register(u1);
+[[vk::image_format("rg16")]]  RWTexture2D<float2> gNormal   : register(u1);
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gMaterial : register(u2);
 [[vk::image_format(LIT_FORMAT_QUALIFIER)]] RWTexture2D<float4> gLit : register(u3);
 
@@ -816,7 +818,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     int2 coord = int2((int)px, (int)py);
     float4 albedo_texel   = gAlbedo.Load(coord);
-    float4 normal_texel   = gNormal.Load(coord);
+    float2 normal_texel   = gNormal.Load(coord);
     float4 material_texel = gMaterial.Load(coord);
 
     float3 base = albedo_texel.rgb;             // RAW LINEAR base color
@@ -828,10 +830,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     float3 lit;
     if (is_sdf_lit) {
-        // Decode the world normal + the 16-bit material id from gNormal.
+        // Decode the world normal from gNormal (oct16) and the 16-bit material id from the two
+        // alpha lanes (IBL1 P1: low byte gAlbedo.A, high byte gMaterial.A — both texels are
+        // already loaded, so the id costs no fetch).
         float3 n = oct_decode(normal_texel.rg);
-        uint id_lo = (uint)(normal_texel.b * 255.0 + 0.5);
-        uint id_hi = (uint)(normal_texel.a * 255.0 + 0.5);
+        uint id_lo = (uint)(albedo_texel.a * 255.0 + 0.5);
+        uint id_hi = (uint)(material_texel.a * 255.0 + 0.5);
         uint mat_id = id_lo | (id_hi << 8);
 
         MaterialGpu m = Materials[mat_id];

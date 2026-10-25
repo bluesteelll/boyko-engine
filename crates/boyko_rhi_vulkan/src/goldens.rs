@@ -53,7 +53,7 @@ use crate::compute::{
     SsaoParams, TILE_FLAG_EMPTY, TILE_SIZE, TileBound, composite_ray, depth_to_t,
     golden_f16_from_f32, pack_rgba, sdf_sphere,
 };
-use crate::present::{LIT_BACKGROUND_SCENE, LIT_FORMAT};
+use crate::present::{GNORMAL_FORMAT, LIT_BACKGROUND_SCENE, LIT_FORMAT};
 
 /// How the device rounds a float written into a `B10G11R11_UFLOAT_PACK32` target, one class per
 /// path in [`boyko_shaderdsl::pixfmt::Path::ALL`]'s order `[store, attachment, blend_add,
@@ -2543,6 +2543,45 @@ fn golden_sky_background(rd: [f32; 3], header: &GoldenLightHeader, lights: &[Gol
     Some(sky)
 }
 
+/// IBL1 P1: bits per oct channel of the G-buffer normal ([`GNORMAL_FORMAT`], `R16G16_UNORM`).
+pub const GNORMAL_OCT_BITS: u32 = match GNORMAL_FORMAT {
+    boyko_rhi::Format::R16G16Unorm => 16,
+    boyko_rhi::Format::R8G8B8A8Unorm => 8,
+    _ => panic!("GNORMAL_FORMAT has no oct quantizer model"),
+};
+
+/// The largest oct code of the G-buffer normal (`2^GNORMAL_OCT_BITS − 1`).
+pub const GNORMAL_OCT_MAX_CODE: u32 = (1u32 << GNORMAL_OCT_BITS) - 1;
+
+/// [`GNORMAL_OCT_MAX_CODE`] as the UNORM scale.
+pub const GNORMAL_OCT_MAX: f32 = GNORMAL_OCT_MAX_CODE as f32;
+
+// `oct_codes_from_oct8` maps an 8-bit code by an exact integer factor.
+const _: () = assert!(GNORMAL_OCT_MAX_CODE.is_multiple_of(255), "the G-buffer oct width must be a multiple of 8 bits");
+
+/// The G-buffer codes of an 8-bit oct pair `c` (`c·m/255`, an exact integer: `m/255` is 1 at 8 bits
+/// and 257 at 16). `code/m` then rounds the same rational as `c/255`, so the pair decodes to the
+/// 8-bit pair's normal bit for bit: host fixtures written in 8-bit codes keep their normal (IBL1 P1).
+#[must_use]
+pub const fn oct_codes_from_oct8(c: [u8; 2]) -> [u16; 2] {
+    let k = GNORMAL_OCT_MAX_CODE / 255;
+    [(c[0] as u32 * k) as u16, (c[1] as u32 * k) as u16]
+}
+
+/// The G-buffer normal store of one oct lane `x ∈ [0, 1]`: its UNORM code at
+/// [`GNORMAL_OCT_BITS`], round-half-up (`(x·m + 0.5)`, the D3D reference rule — the device may
+/// store the other neighbour at a tie, which [`attribute_code_verdict`] admits).
+#[must_use]
+pub fn quantize_oct(x: f32) -> u16 {
+    (x.clamp(0.0, 1.0) * GNORMAL_OCT_MAX + 0.5) as u16
+}
+
+/// The two oct codes of a stored normal, read back as the shader's `[0, 1]` floats.
+#[must_use]
+pub fn oct_codes_unit(codes: [u16; 2]) -> [f32; 2] {
+    [f32::from(codes[0]) / GNORMAL_OCT_MAX, f32::from(codes[1]) / GNORMAL_OCT_MAX]
+}
+
 /// The per-pixel G-buffer attributes the PBR MVP-2 marcher writes, with the UNORM store modelled as
 /// round-half-up (`(x·255 + 0.5)`), so [`golden_deferred_resolve`] can re-decode them and run the
 /// host BRDF. Away from a .5 tie the device stores the same byte; at a tie it may store the other
@@ -2557,9 +2596,10 @@ pub struct MarcherAttributes {
     /// gAlbedo R8G8B8: the RAW LINEAR base color (the picked material's `base_color.rgb`
     /// on an SDF hit, else MESH_COLOR / BACKGROUND), quantized via [`pack_rgba`] rounding.
     pub base_rgb: [u8; 3],
-    /// gNormal R8G8: the octahedral-encoded world normal (SDF hit only; neutral otherwise).
-    pub oct_rg: [u8; 2],
-    /// gNormal B8/A8: the 16-bit material id packed low-byte → B, high-byte → A.
+    /// gNormal ([`GNORMAL_FORMAT`]): the octahedral-encoded world normal's two UNORM codes at
+    /// [`GNORMAL_OCT_BITS`] (SDF hit only; neutral otherwise), via [`quantize_oct`].
+    pub oct_rg: [u16; 2],
+    /// The 16-bit material id, packed low byte → gAlbedo.A, high byte → gMaterial.A (IBL1 P1).
     pub mat_id: u16,
     /// gMaterial.r R8: the A1 soft-shadow visibility `round(255*clamp(shadow))`.
     pub shadow: u8,
@@ -2773,7 +2813,7 @@ pub fn golden_marcher_attributes(
         let oct = oct_encode(n);
         MarcherAttributes {
             base_rgb: base_bytes(base),
-            oct_rg: [q8(oct[0]), q8(oct[1])],
+            oct_rg: [quantize_oct(oct[0]), quantize_oct(oct[1])],
             mat_id,
             shadow: q8(shadow),
             ao: q8(ao),
@@ -2803,11 +2843,12 @@ pub fn golden_marcher_attributes(
         //     Mirror that with `t_mesh` so the host oracle == the GPU on every equivalence golden.
         //
         // The harness quad is fronto-parallel (+Z); the GPU reads the raster normal back from
-        // gNormal and `oct_decode`s it. (0,0,1) encodes to the exact .5 tie 127.5, which the host
-        // stores as 128 and this device as 127 (settle E15, every mesh texel), so the device's decoded
-        // normal is tilted ~0.011 rad from the host's (0,0,1): immaterial at NoL ~ 1 under the
-        // replayed oracle, and the seam gate reads the device's own bytes. `P_mesh = ro + rd *
-        // t_mesh` mirrors the marcher's reconstruct.
+        // gNormal and `oct_decode`s it. (0,0,1) encodes to the exact .5 tie (`0.5·m`), which the
+        // host stores as the upper code and this device as the lower (settle E15, every mesh texel),
+        // so the device's decoded normal is tilted one code from the host's (0,0,1): ~0.011 rad at
+        // the oct8 it had before IBL1 P1, ~4e-5 rad at oct16 — immaterial under the replayed
+        // oracle, and the seam gate reads the device's own codes. `P_mesh = ro + rd * t_mesh`
+        // mirrors the marcher's reconstruct.
         let n = [0.0_f32, 0.0, 1.0];
         let oct = oct_encode(n);
         let p_mesh = [
@@ -2837,7 +2878,7 @@ pub fn golden_marcher_attributes(
         };
         MarcherAttributes {
             base_rgb: base_bytes(MESH_RASTER_ALBEDO),
-            oct_rg: [q8(oct[0]), q8(oct[1])],
+            oct_rg: [quantize_oct(oct[0]), quantize_oct(oct[1])],
             mat_id: 0,
             shadow: q8(shadow),
             ao: q8(ao),
@@ -2850,7 +2891,7 @@ pub fn golden_marcher_attributes(
         // attribute struct round-trips deterministically.
         MarcherAttributes {
             base_rgb: base_bytes(SDF_BACKGROUND),
-            oct_rg: [q8(0.5), q8(0.5)],
+            oct_rg: [quantize_oct(0.5), quantize_oct(0.5)],
             mat_id: 0,
             shadow: 255,
             ao: 255,
@@ -3052,10 +3093,7 @@ pub fn golden_ssao_attributes(
     // Decode the center surface normal ONCE (the same `oct_decode` the resolve mirror uses on
     // `gNormal.rg`). The horizon step measures each neighbour's elevation above the tangent
     // plane this normal defines — CONSTANT across all slices/taps.
-    let center_n = oct_decode([
-        center.oct_rg[0] as f32 / 255.0,
-        center.oct_rg[1] as f32 / 255.0,
-    ]);
+    let center_n = oct_decode(oct_codes_unit(center.oct_rg));
 
     // The screen-pixel march radius (clamped band on PERSPECTIVE; the fixed ortho span).
     let pix_radius = match camera {
@@ -3217,10 +3255,7 @@ pub fn golden_ssao_attributes_derived(
     ];
 
     // The center surface normal — the elevation reference, CONSTANT across all taps.
-    let center_n = oct_decode([
-        center.oct_rg[0] as f32 / 255.0,
-        center.oct_rg[1] as f32 / 255.0,
-    ]);
+    let center_n = oct_decode(oct_codes_unit(center.oct_rg));
 
     // The screen-pixel march radius (clamped band on PERSPECTIVE; the fixed ortho span).
     let pix_radius = match camera {
@@ -3522,7 +3557,7 @@ pub fn golden_deferred_resolve_with_pbr(
     }
 
     // Decode the world normal from the oct RG bytes (the SAME UNORM round-trip the GPU did).
-    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let n = oct_decode(oct_codes_unit(attrs.oct_rg));
     let mat = materials
         .get(attrs.mat_id as usize)
         .copied()
@@ -3725,7 +3760,7 @@ pub fn golden_deferred_resolve_table_ssao(
         return lit_store(golden_sky_background(rd, header, lights).unwrap_or(LIT_BACKGROUND_SCENE));
     }
 
-    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let n = oct_decode(oct_codes_unit(attrs.oct_rg));
     let mat = materials
         .get(attrs.mat_id as usize)
         .copied()
@@ -3983,7 +4018,7 @@ fn resolve_shadowed_impl<F: Fn([f32; 3]) -> f32, H: ResolveHooks>(
     let base: [f32; 3] =
         core::array::from_fn(|c| hooks.site(site(K::Base, pixel, c), base0[c], budget_rel(base0[c], 3.0)));
 
-    let n0 = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let n0 = oct_decode(oct_codes_unit(attrs.oct_rg));
     let n: [f32; 3] = core::array::from_fn(|k| hooks.site(site(K::Normal, pixel, k), n0[k], 30.0 * U));
     let mat = materials
         .get(attrs.mat_id as usize)
@@ -4818,7 +4853,7 @@ pub fn golden_deferred_resolve_clustered(
         attrs.base_rgb[1] as f32 / 255.0,
         attrs.base_rgb[2] as f32 / 255.0,
     ];
-    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let n = oct_decode(oct_codes_unit(attrs.oct_rg));
     let mat = materials
         .get(attrs.mat_id as usize)
         .copied()
@@ -5010,7 +5045,7 @@ pub fn golden_deferred_resolve_clustered_shadowed<F: Fn([f32; 3]) -> f32>(
         attrs.base_rgb[1] as f32 / 255.0,
         attrs.base_rgb[2] as f32 / 255.0,
     ];
-    let n = oct_decode([attrs.oct_rg[0] as f32 / 255.0, attrs.oct_rg[1] as f32 / 255.0]);
+    let n = oct_decode(oct_codes_unit(attrs.oct_rg));
     let mat = materials
         .get(attrs.mat_id as usize)
         .copied()
@@ -6021,15 +6056,16 @@ pub mod fragile_bit {
     pub const OCT_FOLD: u32 = 8;
 }
 
-/// One texel of the device's G-buffer as read back: the three RGBA8 attribute images and the
-/// `gViewT` lane.
+/// One texel of the device's G-buffer as read back: the RGBA8 albedo / material images, the
+/// [`GNORMAL_FORMAT`] normal and the `gViewT` lane.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DeviceGbufferTexel {
-    /// gAlbedo RGBA8 (linear base, 1).
+    /// gAlbedo RGBA8 (linear base RGB, material id low byte A).
     pub albedo: [u8; 4],
-    /// gNormal RGBA8 (oct normal RG, material id low / high byte BA).
-    pub normal: [u8; 4],
-    /// gMaterial RGBA8 (shadow, ao, mask, 1).
+    /// gNormal: the oct normal's two UNORM codes at [`GNORMAL_OCT_BITS`] (R16G16_UNORM: two
+    /// little-endian `u16`).
+    pub normal: [u16; 2],
+    /// gMaterial RGBA8 (shadow, ao, mask, material id high byte).
     pub material: [u8; 4],
     /// gViewT R32F (the surface ray `t`; `1.0e30` on background).
     pub view_t: f32,
@@ -6050,8 +6086,8 @@ impl MarcherAttributes {
         };
         Self {
             base_rgb: [t.albedo[0], t.albedo[1], t.albedo[2]],
-            oct_rg: [t.normal[0], t.normal[1]],
-            mat_id: u16::from(t.normal[2]) | (u16::from(t.normal[3]) << 8),
+            oct_rg: t.normal,
+            mat_id: u16::from(t.albedo[3]) | (u16::from(t.material[3]) << 8),
             shadow: t.material[0],
             ao: t.material[1],
             mask,
@@ -6081,8 +6117,15 @@ pub enum ByteVerdict {
 /// [`ByteVerdict::Mismatch`] otherwise. `w_in` is the device-host bound on `c` itself (codes) —
 /// the device evaluates `x` in f32 with its own op realisation.
 pub fn attribute_byte_verdict(dev: u8, x: f32, w_in: f32) -> ByteVerdict {
-    let c = x.clamp(0.0, 1.0) * 255.0;
-    if dev == (c + 0.5) as u8 {
+    attribute_code_verdict(u16::from(dev), x, w_in, 255.0)
+}
+
+/// [`attribute_byte_verdict`] at any UNORM width: `code_max` is the format's largest code
+/// (`255.0` for an 8-bit lane, [`GNORMAL_OCT_MAX`] for the G-buffer oct normal). `w_in` is in
+/// codes of that width.
+pub fn attribute_code_verdict(dev: u16, x: f32, w_in: f32, code_max: f32) -> ByteVerdict {
+    let c = x.clamp(0.0, 1.0) * code_max;
+    if dev == (c + 0.5) as u16 {
         return ByteVerdict::Exact;
     }
     let window = 0.5 + W_CONV + w_in;
@@ -6703,7 +6746,7 @@ fn normal_from_taps_f64(t: &[f64; 6]) -> [f64; 3] {
     [n[0] / len, n[1] / len, n[2] / len]
 }
 
-/// [`oct_encode`] in f64, scaled to codes (`255·e`).
+/// [`oct_encode`] in f64, scaled to codes (`GNORMAL_OCT_MAX·e`).
 fn oct_codes_f64(n: [f64; 3]) -> [f64; 2] {
     let inv_l1 = 1.0 / (n[0].abs() + n[1].abs() + n[2].abs());
     let (nx, ny, nz) = (n[0] * inv_l1, n[1] * inv_l1, n[2] * inv_l1);
@@ -6714,15 +6757,16 @@ fn oct_codes_f64(n: [f64; 3]) -> [f64; 2] {
         ex = (1.0 - ny.abs()) * sx;
         ey = (1.0 - nx.abs()) * sy;
     }
-    [255.0 * (ex * 0.5 + 0.5), 255.0 * (ey * 0.5 + 0.5)]
+    let m = f64::from(GNORMAL_OCT_MAX);
+    [m * (ex * 0.5 + 0.5), m * (ey * 0.5 + 0.5)]
 }
 
 /// The device-host bounds of the SDF normal at `p` from its six central-difference taps: the oct
-/// codes' (`255·oct`, in codes) and the unit normal's components'. Each is
+/// codes' (`GNORMAL_OCT_MAX·oct`, in codes) and the unit normal's components'. Each is
 /// `Σ_i |∂·/∂tap_i| · ε(tap_i)` (f64 forward differences on the taps; `ε` = [`field_error_bound`]
 /// plus the tap position's rounding through the field's Lipschitz bound), plus the device's own
 /// normalize (`sqrt` + division, 16u) and oct-encode (division + 4 roundings, 10u) on top of the
-/// host's (10u), 40u in all, through the codes' unit scale (255) or the components' (1).
+/// host's (10u), 40u in all, through the codes' unit scale ([`GNORMAL_OCT_MAX`]) or the components' (1).
 fn normal_tap_bounds(edits: &[SdfEdit], p: [f32; 3]) -> ([f32; 2], [f32; 3]) {
     let h = SDF_GRAD_H;
     let pos = [
@@ -6756,7 +6800,10 @@ fn normal_tap_bounds(edits: &[SdfEdit], p: [f32; 3]) -> ([f32; 2], [f32; 3]) {
     }
     let ops = 40.0 * f64::from(U);
     (
-        [(w_oct[0] + 255.0 * ops) as f32, (w_oct[1] + 255.0 * ops) as f32],
+        [
+            (w_oct[0] + f64::from(GNORMAL_OCT_MAX) * ops) as f32,
+            (w_oct[1] + f64::from(GNORMAL_OCT_MAX) * ops) as f32,
+        ],
         [(e_n[0] + ops) as f32, (e_n[1] + ops) as f32, (e_n[2] + ops) as f32],
     )
 }
@@ -6782,7 +6829,7 @@ pub struct MarcherPrequant {
     pub base: [f32; 3],
     /// gNormal RG before quantization (the oct normal in `[0,1]`).
     pub oct: [f32; 2],
-    /// The material id at the device point (gNormal BA).
+    /// The material id at the device point (the gAlbedo.A / gMaterial.A lanes).
     pub mat_id: u16,
     /// gMaterial.r before quantization.
     pub shadow: f32,
@@ -6972,7 +7019,7 @@ pub fn golden_marcher_attributes_at(
         (n, e_n3[0].max(e_n3[1]).max(e_n3[2]), w_oct)
     } else {
         // The raster's normal as the device stored it; the marcher's mesh shadow / AO decode it.
-        let n = oct_decode([device.normal[0] as f32 / 255.0, device.normal[1] as f32 / 255.0]);
+        let n = oct_decode(oct_codes_unit(device.normal));
         (n, 30.0 * U, [0.0; 2])
     };
     pre.mask_byte = 255;
@@ -7082,7 +7129,7 @@ mod tests {
     fn lit_attrs() -> MarcherAttributes {
         MarcherAttributes {
             base_rgb: [180, 120, 90],
-            oct_rg: [140, 160],
+            oct_rg: [quantize_oct(140.0 / 255.0), quantize_oct(160.0 / 255.0)],
             mat_id: 0,
             shadow: 255,
             ao: 200,
@@ -7406,7 +7453,7 @@ mod px1a_reaim_tests {
         let mats = [GoldenMaterial::default()];
         let bg = MarcherAttributes {
             base_rgb: [13, 13, 26],
-            oct_rg: [128, 128],
+            oct_rg: [crate::goldens::quantize_oct(0.5); 2],
             mat_id: 0,
             shadow: 255,
             ao: 255,
@@ -7620,15 +7667,15 @@ mod oi15_seam_tests {
     #[test]
     fn from_device_reads_every_lane() {
         let t = DeviceGbufferTexel {
-            albedo: [204, 205, 206, 255],
-            normal: [98, 192, 0x34, 0x12],
-            material: [250, 240, 255, 255],
+            albedo: [204, 205, 206, 0x34],
+            normal: [25_324, 49_344],
+            material: [250, 240, 255, 0x12],
             view_t: 1.761_967_7,
         };
         let a = MarcherAttributes::from_device(&t);
         assert_eq!(a.base_rgb, [204, 205, 206]);
-        assert_eq!(a.oct_rg, [98, 192]);
-        assert_eq!(a.mat_id, 0x1234);
+        assert_eq!(a.oct_rg, [25_324, 49_344]);
+        assert_eq!(a.mat_id, 0x1234, "the id is gAlbedo.A (low) | gMaterial.A (high) << 8");
         assert_eq!((a.shadow, a.ao, a.mask), (250, 240, 1));
         assert_eq!(a.view_t.to_bits(), t.view_t.to_bits());
         let bg = MarcherAttributes::from_device(&DeviceGbufferTexel { material: [255, 255, 0, 255], ..t });
@@ -7640,7 +7687,7 @@ mod oi15_seam_tests {
     fn from_device_rejects_a_mask_byte_between_the_arms() {
         let _ = MarcherAttributes::from_device(&DeviceGbufferTexel {
             albedo: [0; 4],
-            normal: [0; 4],
+            normal: [0; 2],
             material: [0, 0, 128, 255],
             view_t: 0.0,
         });
@@ -7772,9 +7819,9 @@ mod oi15_seam_tests {
             for omega in [1.0_f32, crate::compute::DEFAULT_MARCHER_OMEGA] {
                 for (px, py, attrs) in texels(&edits) {
                     let own = DeviceGbufferTexel {
-                        albedo: [attrs.base_rgb[0], attrs.base_rgb[1], attrs.base_rgb[2], 255],
-                        normal: [attrs.oct_rg[0], attrs.oct_rg[1], 0, 0],
-                        material: [attrs.shadow, attrs.ao, attrs.mask * 255, 255],
+                        albedo: [attrs.base_rgb[0], attrs.base_rgb[1], attrs.base_rgb[2], (attrs.mat_id & 0xFF) as u8],
+                        normal: attrs.oct_rg,
+                        material: [attrs.shadow, attrs.ao, attrs.mask * 255, (attrs.mat_id >> 8) as u8],
                         view_t: attrs.view_t,
                     };
                     let replay = golden_marcher_attributes(

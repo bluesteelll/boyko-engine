@@ -28,8 +28,9 @@
 // # The angle bias (HBAO+ `NDotVBias`, SSAOM F3)
 //
 // On a smooth-shaded mesh `N` is the INTERPOLATED vertex normal, while the neighbours lie on
-// the FLAT facet: a same-facet tap rises above N's tangent plane by up to sin(tau) + the oct8
-// normal error (tau = the interpolated-vs-facet normal angle; on a convex mesh a tap on
+// the FLAT facet: a same-facet tap rises above N's tangent plane by up to sin(tau) + the stored
+// normal's oct error (oct8 on VB_THIN's thin normal, oct16 on the Deferred gNormal since IBL1 P1)
+// (tau = the interpolated-vs-facet normal angle; on a convex mesh a tap on
 // another facet lies below the center facet's plane and rises less). Unbiased, those taps
 // darkened the AO in a pattern locked to the facets (the owner's 64-slice gold sphere showed
 // regular vertical stripes). Each tap's elevation sine is therefore reduced by
@@ -79,7 +80,7 @@
 //
 // # Resources (dedicated 5-binding SSAO bind-group — the base, non-`VB_THIN` build)
 //
-//   binding 0 : RWTexture2D<float4> (STORAGE, rgba8) — gNormal   (READ; oct + material id)
+//   binding 0 : RWTexture2D<float2> (STORAGE, rg16)  — gNormal   (READ; the oct16 normal, IBL1 P1)
 //   binding 1 : RWTexture2D<float4> (STORAGE, rgba8) — gMaterial (READ; .b = mask)
 //   binding 2 : RWTexture2D<float>  (STORAGE, r32f)  — gViewT    (READ; surface ray param t)
 //   binding 3 : RWTexture2D<float>  (STORAGE, r8)    — ssao      (WRITE; the AO factor)
@@ -142,7 +143,7 @@
 // binding 2: the SSAO output lane (R8_UNORM STORAGE in GENERAL its whole life).
 [[vk::image_format("r8")]]    RWTexture2D<float>  ssao        : register(u2);
 #else
-[[vk::image_format("rgba8")]] RWTexture2D<float4> gNormal   : register(u0);
+[[vk::image_format("rg16")]]  RWTexture2D<float2> gNormal   : register(u0);
 [[vk::image_format("rgba8")]] RWTexture2D<float4> gMaterial : register(u1);
 [[vk::image_format("r32f")]]  RWTexture2D<float>  gViewT    : register(u2);
 // binding 3: the SSAO output lane (R8_UNORM STORAGE in GENERAL its whole life).
