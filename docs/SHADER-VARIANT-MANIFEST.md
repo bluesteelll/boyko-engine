@@ -15,7 +15,7 @@ correctly stays out of the tables — but the SAME shader's `VB_THIN` axis IS a 
 binding, so it has its own section below. Do not read "SSAO quality is excluded" as "the SSAO gather
 has no variant axis".)
 
-## The three axes
+## The four axes
 
 | Axis (`-D`) | Values | What it changes |
 |---|---|---|

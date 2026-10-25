@@ -58,6 +58,9 @@ static const uint LIGHT_FLAG_CASTS_SHADOW = 0x10000u; // bit 16: this light cast
 // (`pack_atlas_slot`), so on the host the bit reads "slotted". The punctual atlas sites never test
 // it (they test the slot field, below); the two meanings meet only under the multi-light
 // `shadow_mode` — follow-up R1-F1 in docs/render/light-table-defects/R1-DESIGN.md.
+// IBL1 R1: BIT 24 of a SKY row's kind word is `LIGHT_FLAG_ENV` (`boyko_render::light`), the
+// environment row; only the `-D REFL=1` producers test it (`env_ibl.hlsli`'s `light_env_armed`).
+// `LIGHT_KIND_MASK` drops it, so `light_kind()` still reads SKY.
 
 // See `boyko_render::light`'s "Light-header word 7 bit budget" table (in that crate's
 // source, right above `CSM_MODE_BIT`) for the authoritative map of every sub-field the
