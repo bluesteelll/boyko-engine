@@ -31,6 +31,9 @@ pub use boyko_render::{
     CastsPunctualShadow, CsmConfig, DirectionalLight, DirectionalLightObject, PointLight,
     PointLightObject, ShadowCaster, ShadowConfig, SkyLight, SpotLight, SpotLightObject,
 };
+// IBL1 R1: the environment light — the boot-frozen [`EnvironmentConfig`] (`EnvSource::Off` by
+// default) and the runtime [`EnvironmentLight`] component (presence is the capability).
+pub use boyko_render::environment::{EnvSource, EnvironmentConfig, EnvironmentLight};
 
 // The interpolation surface (host plan R5): the per-entity [`GpuTransform3D`] pair
 // (its PRESENCE opts a body into interpolation — the pack shuffles prev/curr, the

@@ -11,9 +11,25 @@
 //! no decoder runs, and nothing is licensed. [`parse_env_blob`] reads the header once, cold, at
 //! boot.
 //!
+//! # The ECS shape (cut D-P2e; capability is structural)
+//!
+//! - [`EnvironmentConfig`] — the owner-set `Resource` (`EnvSource::Off` by default, so a world that
+//!   never sets it is byte-identical to today: decision 2). BOOT-FROZEN: the GPU boot reads it once
+//!   ([`resolve_environment`]) into [`ResolvedEnvironment`], which decides which pipelines the boot
+//!   builds (the base `.spv` or the `-D REFL=1` twins) and whether the environment image exists.
+//! - [`EnvironmentLight`] — the runtime half, a component. Presence IS the capability: on an armed
+//!   boot the light fold writes the ONE SKY row from it (D20) instead of any `SkyLight`; with none
+//!   present the row is today's `SkyLight` row and the REFL pipelines take their hemisphere arm.
+//! - [`EnvironmentPlugin`] — inserts the config and an UNARMED [`ResolvedEnvironment`], and
+//!   registers the removal hook that re-folds the light table. The runner overrides the resolved
+//!   value after the GPU boot and marks the table dirty on arming (the `ResolvedRenderPath`
+//!   post-boot override precedent), so the first fold after arming writes the environment row.
+//!
 //! What this rung keeps and drops is listed in `ibl1/cut.md` §1.2.2: no `.hdr` decoder, no
 //! equirect resampling, no `EnvHandle` asset column, no DFG LUT, no SH-9 (the diffuse keeps the
 //! hemisphere term with lanes derived from the map), no environment-drawn background.
+
+use boyko_macros::{Component, Resource};
 
 // ---- The asset ------------------------------------------------------------------------------------
 
@@ -154,4 +170,151 @@ pub fn parse_env_blob(bytes: &[u8]) -> Result<EnvAsset<'_>, EnvBlobError> {
         return Err(EnvBlobError::ChainSize { want, got });
     }
     Ok(EnvAsset { header, chain: &bytes[ENV_BLOB_HEADER_BYTES..] })
+}
+
+// ---- The owner-set config (boot-frozen) -------------------------------------------------------------
+
+/// Which environment map an armed boot uploads. [`EnvSource::Off`] IS "no environment": the boot
+/// builds today's pipelines, creates no image, and every lit pixel is byte-identical to a world
+/// without this module (capability is structural; there is no separate `enabled` flag).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum EnvSource {
+    /// No environment (the DEFAULT — decision 2: defaults add nothing).
+    #[default]
+    Off,
+    /// The built-in procedural studio room ([`STUDIO_ENV_BLOB`]).
+    Studio,
+}
+
+/// The owner-set environment config — a `World`-singleton `Resource`, read ONCE at GPU boot
+/// ([`resolve_environment`]); a later change has no effect for the process lifetime (the
+/// `SsaoConfig` → `ResolvedSsao` boot-freeze shape). Insert it after `add_plugins` and before the
+/// app runs.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EnvironmentConfig {
+    /// The map an armed boot uploads; [`EnvSource::Off`] (the default) arms nothing.
+    pub source: EnvSource,
+}
+
+/// The boot-frozen environment carrier: whether this boot is ARMED (the `-D REFL=1` pipelines and
+/// the environment image exist) and the map's shape and SKY-row lanes. [`Default`] is unarmed.
+///
+/// [`EnvironmentPlugin`] inserts the unarmed value at build; the runner overrides it with the GPU
+/// boot's resolved value. A world with no `ResolvedEnvironment` at all (a host that composes
+/// `LightingPlugin` without `EnvironmentPlugin`) is unarmed too: the light fold reads it as
+/// `Option<Res<_>>`.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct ResolvedEnvironment {
+    /// The boot uploaded an environment chain and built the REFL pipelines.
+    pub armed: bool,
+    /// The chain's level-0 side (0 when unarmed).
+    pub tile: u32,
+    /// The chain's level count (0 when unarmed).
+    pub levels: u32,
+    /// The map's upper-hemisphere lane `E(+y)/π` at intensity 1.
+    pub sky_lane: [f32; 3],
+    /// The map's lower-hemisphere lane `E(−y)/π` at intensity 1.
+    pub ground_lane: [f32; 3],
+}
+
+impl ResolvedEnvironment {
+    /// The armed carrier of a parsed map.
+    #[must_use]
+    pub const fn armed(header: &EnvAssetHeader) -> Self {
+        Self {
+            armed: true,
+            tile: header.tile,
+            levels: header.levels,
+            sky_lane: header.sky_lane,
+            ground_lane: header.ground_lane,
+        }
+    }
+
+    /// The last level's index, `levels − 1` (the shader's `L1`); 0 when unarmed.
+    #[must_use]
+    pub const fn l1(&self) -> u32 {
+        self.levels.saturating_sub(1)
+    }
+}
+
+/// Resolves the owner's [`EnvironmentConfig`] (absent ⇒ [`EnvSource::Off`]) into the boot-frozen
+/// carrier and, when armed, the map the GPU boot uploads. Cold: called once, before the GPU boot.
+/// A committed blob that does not parse (a build-integrity defect `tests/ibl_studio_sync.rs`
+/// catches first) degrades to unarmed rather than panicking.
+#[must_use]
+pub fn resolve_environment(cfg: Option<&EnvironmentConfig>) -> (ResolvedEnvironment, Option<EnvAsset<'static>>) {
+    match cfg.map_or(EnvSource::Off, |c| c.source) {
+        EnvSource::Off => (ResolvedEnvironment::default(), None),
+        EnvSource::Studio => match parse_env_blob(STUDIO_ENV_BLOB) {
+            Ok(asset) => (ResolvedEnvironment::armed(&asset.header), Some(asset)),
+            Err(_) => (ResolvedEnvironment::default(), None),
+        },
+    }
+}
+
+// ---- The runtime half -------------------------------------------------------------------------------
+
+/// The environment light (D-P2e): on an ARMED boot its presence makes the light fold write the
+/// ONE SKY row from the environment map — the row's sky/ground lanes are the map's hemisphere
+/// lanes × `intensity` (the background and the diffuse hemisphere read them), and the REFL
+/// producers sample the prefiltered chain for the ambient specular. Without one (or on an unarmed
+/// boot) the row is today's [`SkyLight`](crate::light::SkyLight) row.
+///
+/// Rules the fold applies (each case counted and reported once, `boyko-W2209`):
+/// - an armed boot with both an `EnvironmentLight` and a `SkyLight` writes the environment row
+///   only;
+/// - two or more `EnvironmentLight`s: the one with the lowest entity id wins;
+/// - an unarmed boot ignores every `EnvironmentLight` (the table bytes are unchanged);
+/// - a non-finite or negative `intensity`, or a non-finite `yaw`, folds as 0.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub struct EnvironmentLight {
+    /// The map's scale. At 1 an up-facing surface receives unit irradiance from the map (the
+    /// studio's `E(+y) = 1` normalization), so against a `DirectionalLight` of illuminance `E` the
+    /// map is `1 : E·cos θ`.
+    pub intensity: f32,
+    /// The map's rotation about +y, in radians (right-handed: a feature at map direction `e` is
+    /// seen at world direction `R_y(yaw)·e`).
+    pub yaw: f32,
+}
+
+impl EnvironmentLight {
+    /// An environment light of the given intensity and yaw (radians).
+    #[inline]
+    #[must_use]
+    pub const fn new(intensity: f32, yaw: f32) -> Self {
+        Self { intensity, yaw }
+    }
+}
+
+impl Default for EnvironmentLight {
+    /// Intensity 1, yaw 0.
+    #[inline]
+    fn default() -> Self {
+        Self::new(1.0, 0.0)
+    }
+}
+
+// ---- The plugin -------------------------------------------------------------------------------------
+
+/// Registers the environment light: inserts the default (Off) [`EnvironmentConfig`] and an unarmed
+/// [`ResolvedEnvironment`], and hooks [`EnvironmentLight`] removal into the light table's dirty
+/// channel (`evict_light`, the light-component precedent), so despawning the environment re-folds
+/// the table and the `SkyLight` row comes back. Composed by `boyko_app::EnginePlugins`.
+#[derive(Default)]
+pub struct EnvironmentPlugin;
+
+impl boyko_ecs::ecs::core::app::Plugin for EnvironmentPlugin {
+    fn build(&self, app: &mut boyko_ecs::ecs::core::app::App) {
+        app.world_mut()
+            .register_component_hooks::<EnvironmentLight>()
+            .on_remove(crate::light_system::evict_light)
+            .finish();
+        app.insert_resource(EnvironmentConfig::default());
+        app.insert_resource(ResolvedEnvironment::default());
+    }
+
+    fn name(&self) -> &'static str {
+        "boyko_render::EnvironmentPlugin"
+    }
 }

@@ -56,6 +56,7 @@ fn ibl_studio_sync() {
     assert_eq!(STUDIO_ENV_BLOB_BYTES, STUDIO_BLOB_BYTES, "the two crates agree on the blob size");
     assert_eq!(ENV_BLOB_HEADER_BYTES, boyko_shaderdsl::ibl::ENV_HEADER_BYTES);
     assert_eq!(ENV_FORMAT_B10G11R11, boyko_shaderdsl::ibl::ENV_FORMAT_B10G11R11);
+    assert_eq!(boyko_render::light::LIGHT_FLAG_ENV, boyko_shaderdsl::ibl::LIGHT_FLAG_ENV, "one SKY-row flag");
     let (blob, _) = baked();
     let file = committed();
     assert_eq!(file.as_slice(), STUDIO_ENV_BLOB.as_slice(), "the include_bytes! blob is the committed file");

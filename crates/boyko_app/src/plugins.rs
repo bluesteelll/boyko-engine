@@ -498,6 +498,11 @@ impl Plugin for EnginePlugins {
         // edges hold whatever the add-order, this placement only keeps the composition readable.
         app.add_plugin(boyko_render::post::PostPlugin);
         app.add_plugin(LightingPlugin);
+        // IBL1 R1 (D-P2e): the environment light — its Off-by-default `EnvironmentConfig`, the
+        // unarmed `ResolvedEnvironment` the runner overrides after the GPU boot, and the
+        // `EnvironmentLight` removal hook. Adds no system: the light fold reads both through
+        // `Option<Res<_>>`, so a host composing `LightingPlugin` alone stays unarmed.
+        app.add_plugin(boyko_render::environment::EnvironmentPlugin);
         app.add_plugin(SsaoPlugin);
         app.add_plugin(CsmPlugin);
         // ShadowAtlasPlugin (the punctual host rung) — the spot/point analogue of CsmPlugin:

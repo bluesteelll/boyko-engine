@@ -29,9 +29,10 @@ use boyko_ecs::ecs::core::system::into_system::IntoSystem;
 use boyko_ecs::ecs::core::system::system::System;
 use boyko_ecs::ecs::core::system::{Res, ResMut};
 use boyko_ecs::ecs::identifiers::primitives::EntityId;
-use boyko_log::codes::{OnceSite, W2201, W2204};
+use boyko_log::codes::{OnceSite, W2201, W2204, W2209};
 use boyko_macros::{Resource, SystemSet};
 
+use crate::environment::{EnvironmentLight, ResolvedEnvironment};
 use crate::light::{
     DirectionalLight, GpuLight, LIGHT_KIND_DIRECTIONAL, LIGHT_KIND_MASK, LIGHT_KIND_SKY, LightEnabled,
     LightHeaderGpu, LightTableDirty, LightingConfig, MAX_LIGHTS, PointLight, SkyLight, SpotLight,
@@ -56,6 +57,18 @@ pub(crate) static W2201_SITE: OnceSite = OnceSite::new();
 /// `boyko-W2204`'s per-site `Once` latch — the non-finite-light drop report. Separate from
 /// [`W2201_SITE`] because the two are separate codes; see that static's doc.
 pub(crate) static W2204_SITE: OnceSite = OnceSite::new();
+
+/// `boyko-W2209`'s four per-CONDITION `Once` latches (IBL1 D-P2e) — one code, one latch per site,
+/// so a first unarmed report never silences a later conflict report (`W3005`'s two-site
+/// precedent): an `EnvironmentLight` on an unarmed boot, a co-present `SkyLight`, a second
+/// `EnvironmentLight`, a non-finite or negative value.
+pub(crate) static W2209_UNARMED_SITE: OnceSite = OnceSite::new();
+/// See [`W2209_UNARMED_SITE`].
+pub(crate) static W2209_SKY_CONFLICT_SITE: OnceSite = OnceSite::new();
+/// See [`W2209_UNARMED_SITE`].
+pub(crate) static W2209_EXTRA_LIGHT_SITE: OnceSite = OnceSite::new();
+/// See [`W2209_UNARMED_SITE`].
+pub(crate) static W2209_SANITIZED_SITE: OnceSite = OnceSite::new();
 
 /// The staged-light-table WRITE GENERATION (host plan D5) — a monotonic counter
 /// bumped by [`collect_lights`] exactly once per ACTUAL rows rewrite (the rebuild is
@@ -405,6 +418,23 @@ pub fn fold_light_table_slotted<'a>(
     cfg: &LightingConfig,
     pre_exposure: f32,
 ) -> usize {
+    fold_light_rows(dst, directionals, skies.map(GpuLight::from_sky), points, spots, cfg, pre_exposure)
+}
+
+/// [`fold_light_table_slotted`] over pre-built SKY rows: the one fold body. `sky_rows` is either
+/// the enabled `SkyLight`s' [`GpuLight::from_sky`] rows or — on an armed boot with an
+/// [`EnvironmentLight`] — the ONE [`GpuLight::from_environment`] row (D20, [`plan_env_row`]);
+/// [`collect_lights`] chooses, every other caller passes `from_sky` rows, so their bytes are the
+/// pre-IBL1 bytes.
+pub(crate) fn fold_light_rows<'a>(
+    dst: &mut [u8],
+    directionals: impl Iterator<Item = &'a DirectionalLight>,
+    sky_rows: impl Iterator<Item = GpuLight>,
+    points: impl Iterator<Item = (u32, &'a PointLight)>,
+    spots: impl Iterator<Item = (u32, &'a SpotLight)>,
+    cfg: &LightingConfig,
+    pre_exposure: f32,
+) -> usize {
     // The body starts after the header region; walk the iterators in table order,
     // converting + writing each light in place and counting the two header blocks.
     // `written` is the running total across all four kinds — the single quantity the
@@ -421,11 +451,11 @@ pub fn fold_light_table_slotted<'a>(
         written += 1;
         l0a_count += 1;
     }
-    for s in skies {
+    for row in sky_rows {
         if written == MAX_LIGHTS {
             return finish_folded_overflow(dst, l0a_count, 0, off, cfg, pre_exposure);
         }
-        write_pod(dst, off, &GpuLight::from_sky(s));
+        write_pod(dst, off, &row);
         off += GPU_LIGHT_BYTES;
         written += 1;
         l0a_count += 1;
@@ -729,6 +759,77 @@ pub struct LightCollectSet;
 #[derive(SystemSet, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LightSeedSet;
 
+/// What [`plan_env_row`] noticed while planning the environment row — each a `boyko-W2209` case,
+/// reported once per condition ([`W2209_UNARMED_SITE`] and its siblings).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EnvFoldNotes {
+    /// An `EnvironmentLight` exists but the boot is unarmed: it is ignored (table bytes unchanged).
+    pub unarmed_ignored: bool,
+    /// An enabled `SkyLight` co-exists with the armed environment row: it writes nothing.
+    pub sky_conflict: bool,
+    /// More than one `EnvironmentLight` exists: the lowest entity id wins.
+    pub extra_lights: bool,
+    /// The winning light's intensity was non-finite or negative, or its yaw non-finite: folded as 0.
+    pub sanitized: bool,
+}
+
+impl EnvFoldNotes {
+    /// Whether any case fired.
+    #[inline]
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.unarmed_ignored || self.sky_conflict || self.extra_lights || self.sanitized
+    }
+}
+
+/// IBL1 D20 / D-P2e — plans the ONE environment SKY row: `Some` iff the boot is armed (`resolved`
+/// present and `armed`) and at least one [`EnvironmentLight`] exists; the light with the lowest key
+/// (entity id) wins; a non-finite or negative intensity and a non-finite yaw fold as 0. Pure (the
+/// rule's unit tests run it without a world); `sky_enabled` only feeds the conflict note.
+pub fn plan_env_row<K: Ord + Copy>(
+    resolved: Option<&ResolvedEnvironment>,
+    lights: impl Iterator<Item = (K, EnvironmentLight)>,
+    sky_enabled: bool,
+) -> (Option<GpuLight>, EnvFoldNotes) {
+    let mut first: Option<(K, EnvironmentLight)> = None;
+    let mut count = 0u32;
+    for (key, light) in lights {
+        count += 1;
+        if first.is_none_or(|(k, _)| key < k) {
+            first = Some((key, light));
+        }
+    }
+    let mut notes = EnvFoldNotes::default();
+    let Some((_, light)) = first else { return (None, notes) };
+    let Some(env) = resolved.filter(|r| r.armed) else {
+        notes.unarmed_ignored = true;
+        return (None, notes);
+    };
+    notes.extra_lights = count > 1;
+    notes.sky_conflict = sky_enabled;
+    let intensity = if light.intensity.is_finite() && light.intensity >= 0.0 { light.intensity } else { 0.0 };
+    let yaw = if light.yaw.is_finite() { light.yaw } else { 0.0 };
+    notes.sanitized = intensity.to_bits() != light.intensity.to_bits() || yaw.to_bits() != light.yaw.to_bits();
+    (Some(GpuLight::from_environment(intensity, yaw.cos(), yaw.sin(), env)), notes)
+}
+
+/// Reports each fired [`EnvFoldNotes`] case once (`boyko-W2209`, one latch per condition).
+#[cold]
+#[inline(never)]
+fn report_env_notes(notes: EnvFoldNotes) {
+    let cases = [
+        (notes.unarmed_ignored, &W2209_UNARMED_SITE, "an EnvironmentLight exists but this boot is unarmed (EnvironmentConfig.source was Off at GPU boot), so it is ignored"),
+        (notes.sky_conflict, &W2209_SKY_CONFLICT_SITE, "a SkyLight co-exists with the armed EnvironmentLight; the environment row is the one sky row and the SkyLight writes nothing"),
+        (notes.extra_lights, &W2209_EXTRA_LIGHT_SITE, "more than one EnvironmentLight exists; the one with the lowest entity id is used"),
+        (notes.sanitized, &W2209_SANITIZED_SITE, "the EnvironmentLight's intensity is non-finite or negative, or its yaw non-finite; folded as 0"),
+    ];
+    for (fired, site, what) in cases {
+        if fired && site.claim() {
+            boyko_log::warn!(boyko_log::Render, W2209, "environment light: {}", what);
+        }
+    }
+}
+
 /// The L0 collection system (Decision 4) — `Changed`-gated.
 ///
 /// On a frame where a light component changed (or [`LightTableDirty`] is set), folds the live
@@ -754,11 +855,18 @@ pub fn collect_lights(
     // `SystemParam` slot so the system stays within the 12-param arity limit (the entity-keyed
     // `PunctualSlotAssignment` read added a 13th param). A tuple is itself a `SystemParam`, so this
     // is a pure regrouping — the per-query access + `Changed` semantics are unchanged.
+    //
+    // IBL1 D-P2e: the `Changed<EnvironmentLight>` probe and the environment read
+    // `(Option<Res<ResolvedEnvironment>>, Query<&EnvironmentLight>)` ride the SAME tuple (a 13th
+    // top-level param would exceed the arity cap). `Option<Res<_>>` is how a world without
+    // `EnvironmentPlugin` — every `LightingPlugin`-only test world — stays unarmed and panic-free.
     changed: (
         Query<&DirectionalLight, Changed<DirectionalLight>>,
         Query<&SkyLight, Changed<SkyLight>>,
         Query<&PointLight, Changed<PointLight>>,
         Query<&SpotLight, Changed<SpotLight>>,
+        Query<&EnvironmentLight, Changed<EnvironmentLight>>,
+        (Option<Res<ResolvedEnvironment>>, Query<&EnvironmentLight>),
     ),
     all_directionals: Query<(&DirectionalLight, IsEnabled<LightEnabled>)>,
     all_skies: Query<(&SkyLight, IsEnabled<LightEnabled>)>,
@@ -780,15 +888,23 @@ pub fn collect_lights(
     // the on_remove hook registered first in LightingPlugin::build — so this gate evicts
     // them next frame. The dirty bit is consumed unconditionally after every rebuild (no
     // early-return in between).
-    let (changed_dir, changed_sky, changed_point, changed_spot) = &changed;
+    let (changed_dir, changed_sky, changed_point, changed_spot, changed_env, env) = &changed;
     let changed = changed_dir.iter().next().is_some()
         || changed_sky.iter().next().is_some()
         || changed_point.iter().next().is_some()
-        || changed_spot.iter().next().is_some();
+        || changed_spot.iter().next().is_some()
+        || changed_env.iter().next().is_some();
     if changed || dirty.0 {
+        let sky_enabled = all_skies.iter().any(|(_, en)| en);
+        let (env_row, notes) =
+            plan_env_row(env.0.as_deref(), env.1.iter_entities().map(|(id, l)| (id, *l)), sky_enabled);
+        if notes.any() {
+            report_env_notes(notes);
+        }
         rebuild_light_rows(
             &all_directionals,
             &all_skies,
+            env_row,
             &all_points,
             &all_spots,
             &cfg,
@@ -818,6 +934,7 @@ pub fn collect_lights(
 fn rebuild_light_rows(
     all_directionals: &Query<(&DirectionalLight, IsEnabled<LightEnabled>)>,
     all_skies: &Query<(&SkyLight, IsEnabled<LightEnabled>)>,
+    env_row: Option<GpuLight>,
     all_points: &Query<(&PointLight, IsEnabled<LightEnabled>)>,
     all_spots: &Query<(&SpotLight, IsEnabled<LightEnabled>)>,
     cfg: &LightingConfig,
@@ -844,10 +961,15 @@ fn rebuild_light_rows(
     // `staging.scratch`, so the plain `staging.used_bytes = used;` write below (a distinct
     // field) needs no explicit drop.
     let mut scratch_view = staging.scratch.build_view();
-    let used = fold_light_table_slotted(
+    // D20: the environment row, when planned, is the ONE sky row — every `SkyLight` is skipped.
+    let no_env = env_row.is_none();
+    let sky_rows = env_row
+        .into_iter()
+        .chain(all_skies.iter().filter(move |&(_, en)| no_env && en).map(|(l, _)| GpuLight::from_sky(l)));
+    let used = fold_light_rows(
         scratch_view.as_mut_slice(),
         all_directionals.iter().filter_map(|(l, en)| en.then_some(l)),
-        all_skies.iter().filter_map(|(l, en)| en.then_some(l)),
+        sky_rows,
         all_points
             .iter_entities()
             .filter_map(|(id, (l, en))| en.then_some((assign.base_for(id), l))),
@@ -1915,5 +2037,137 @@ mod l8a_light_codes {
         watch_any();
         let _ = fold(&[good_point(), good_point()]);
         assert_eq!(watched(), 0, "a clean fold is silent");
+    }
+}
+
+#[cfg(test)]
+mod ibl1_env_row {
+    //! IBL1 D20 / D-P2e — the pure environment-row rule ([`plan_env_row`]) and its `boyko-W2209`
+    //! reports. The App-level phases (the boot override, the `Changed` probe, the removal hook)
+    //! are `tests/environment_fold.rs`.
+    use super::*;
+    use boyko_log::probe::{watch, watched};
+
+    use crate::log_probe::arm;
+
+    fn armed() -> ResolvedEnvironment {
+        ResolvedEnvironment { armed: true, tile: 256, levels: 7, sky_lane: [0.30, 0.31, 0.32], ground_lane: [0.05, 0.06, 0.07] }
+    }
+
+    fn sky() -> SkyLight {
+        SkyLight::new([0.9, 0.8, 0.7], [0.2, 0.2, 0.2])
+    }
+
+    fn sun() -> DirectionalLight {
+        DirectionalLight { direction: [0.0, 1.0, 0.0], color: [1.0, 1.0, 1.0], illuminance: 3.0 }
+    }
+
+    /// Folds `[sun] + sky rows + no punctual` the way `rebuild_light_rows` does.
+    fn fold_planned(env_row: Option<GpuLight>, skies: &[SkyLight]) -> Vec<u8> {
+        let cfg = LightingConfig::default();
+        let mut dst = vec![0u8; LIGHT_HEADER_BYTES + MAX_LIGHTS as usize * GPU_LIGHT_BYTES];
+        let suns = [sun()];
+        let no_env = env_row.is_none();
+        let rows = env_row.into_iter().chain(skies.iter().filter(move |_| no_env).map(GpuLight::from_sky));
+        let used = fold_light_rows(&mut dst, suns.iter(), rows, core::iter::empty(), core::iter::empty(), &cfg, 1.0);
+        dst.truncate(used);
+        dst
+    }
+
+    fn reference(skies: &[SkyLight]) -> Vec<u8> {
+        let cfg = LightingConfig::default();
+        let mut dst = vec![0u8; LIGHT_HEADER_BYTES + MAX_LIGHTS as usize * GPU_LIGHT_BYTES];
+        let used = write_light_table(&mut dst, &[sun()], skies, &[], &[], &cfg, 1.0);
+        dst.truncate(used);
+        dst
+    }
+
+    #[test]
+    fn unarmed_or_absent_environment_folds_the_sky_bytes() {
+        let lights = [(3u32, EnvironmentLight::new(1.0, 0.4))];
+        let unarmed = ResolvedEnvironment::default();
+        for resolved in [None, Some(&unarmed)] {
+            let (row, notes) = plan_env_row(resolved, lights.iter().copied(), true);
+            assert!(row.is_none(), "an unarmed boot plans no environment row");
+            assert!(notes.unarmed_ignored && !notes.sky_conflict, "{notes:?}");
+            assert_eq!(fold_planned(row, &[sky()]), reference(&[sky()]), "the table bytes are the pre-IBL1 bytes");
+        }
+        let (row, notes) = plan_env_row(Some(&armed()), core::iter::empty::<(u32, EnvironmentLight)>(), true);
+        assert!(row.is_none() && !notes.any(), "no EnvironmentLight: today's SkyLight row, no report");
+    }
+
+    #[test]
+    fn armed_row_carries_the_flag_the_lanes_and_the_yaw() {
+        let env = armed();
+        let (row, notes) = plan_env_row(Some(&env), [(1u32, EnvironmentLight::new(2.0, 0.75))].into_iter(), false);
+        let row = row.expect("armed + a light plans the row");
+        assert!(!notes.any(), "{notes:?}");
+        assert_eq!(row.dir_kind[3].to_bits(), LIGHT_KIND_SKY | crate::light::LIGHT_FLAG_ENV);
+        assert_eq!(row.dir_kind[3].to_bits() & LIGHT_KIND_MASK, LIGHT_KIND_SKY, "the masked kind stays SKY");
+        assert_eq!(row.dir_kind[0], 2.0);
+        assert_eq!(row.dir_kind[1], 0.75f32.cos(), "cos yaw rides dir.y");
+        assert_eq!(row.dir_kind[2], 0.75f32.sin(), "sin yaw rides dir.z");
+        assert_eq!(row.color_cone, [0.60, 0.62, 0.64, 256.0], "sky lane × intensity, tile");
+        assert_eq!(row.pos_range, [0.10, 0.12, 0.14, 6.0], "ground lane × intensity, L1");
+    }
+
+    #[test]
+    fn armed_world_folds_exactly_one_sky_row() {
+        let (row, notes) = plan_env_row(Some(&armed()), [(1u32, EnvironmentLight::new(1.0, 0.0))].into_iter(), true);
+        assert!(notes.sky_conflict, "the co-present SkyLight is noted");
+        let bytes = fold_planned(row, &[sky(), sky()]);
+        let l0a = table_word(&bytes, L0A_COUNT_OFFSET).expect("the header holds l0a_count");
+        assert_eq!(l0a, 2, "one directional + ONE sky row, however many SkyLights exist");
+        assert!(table_has_sky(&bytes), "the receipt sees the flagged row as a sky row");
+    }
+
+    #[test]
+    fn the_lowest_entity_id_wins_and_extras_are_noted() {
+        let lights = [
+            (9u32, EnvironmentLight::new(9.0, 0.0)),
+            (2, EnvironmentLight::new(2.0, 0.0)),
+            (5, EnvironmentLight::new(5.0, 0.0)),
+        ];
+        let (row, notes) = plan_env_row(Some(&armed()), lights.into_iter(), false);
+        assert_eq!(row.expect("planned").dir_kind[0], 2.0, "key 2 wins regardless of iteration order");
+        assert!(notes.extra_lights);
+    }
+
+    #[test]
+    fn non_finite_or_negative_values_fold_as_zero() {
+        for (light, intensity, yaw) in [
+            (EnvironmentLight::new(f32::NAN, 0.3), 0.0, 0.3),
+            (EnvironmentLight::new(-1.0, 0.3), 0.0, 0.3),
+            (EnvironmentLight::new(f32::INFINITY, 0.3), 0.0, 0.3),
+            (EnvironmentLight::new(1.5, f32::NAN), 1.5, 0.0),
+            (EnvironmentLight::new(1.5, f32::NEG_INFINITY), 1.5, 0.0),
+        ] {
+            let (row, notes) = plan_env_row(Some(&armed()), [(1u32, light)].into_iter(), false);
+            let row = row.expect("planned");
+            assert!(notes.sanitized, "{light:?} is noted");
+            assert_eq!(row.dir_kind[0], intensity, "{light:?}");
+            assert_eq!(row.dir_kind[1], f32::cos(yaw), "{light:?}");
+            assert!(row.dir_kind.iter().chain(&row.pos_range).chain(&row.color_cone).all(|v| v.is_finite()), "{row:?}");
+        }
+    }
+
+    /// One code, four latches: each condition reports once and never silences another.
+    #[test]
+    fn w2209_reports_each_case_once_on_its_own_latch() {
+        let _observe = boyko_log::probe::observe_lock();
+        arm();
+        for site in [&W2209_UNARMED_SITE, &W2209_SKY_CONFLICT_SITE, &W2209_EXTRA_LIGHT_SITE, &W2209_SANITIZED_SITE] {
+            site.reset();
+        }
+        let unarmed = EnvFoldNotes { unarmed_ignored: true, ..EnvFoldNotes::default() };
+        watch(b'W', W2209.number());
+        report_env_notes(unarmed);
+        assert_eq!(watched(), 1, "the first unarmed fold reports");
+        watch(b'W', W2209.number());
+        report_env_notes(unarmed);
+        assert_eq!(watched(), 0, "Once: the second is silent");
+        watch(b'W', W2209.number());
+        report_env_notes(EnvFoldNotes { sky_conflict: true, extra_lights: true, sanitized: true, ..EnvFoldNotes::default() });
+        assert_eq!(watched(), 3, "the other three cases have latches of their own");
     }
 }

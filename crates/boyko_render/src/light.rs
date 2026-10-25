@@ -42,6 +42,12 @@ pub const LIGHT_KIND_SKY: u32 = 3;
 /// them (bit 16 = the SDF-caster flag, bits `17..22` = the atlas slot), so every `kind ==` compare
 /// masks with this first, exactly as the shaders' `light_kind()` does.
 pub const LIGHT_KIND_MASK: u32 = 0xFFFF;
+/// IBL1 R1 (D-P2d): the SKY-row kind-word flag that marks the ENVIRONMENT row ([`GpuLight::from_environment`])
+/// — bit 24, above the point/spot shadow fields (bit 16 and bits `17..22`), so it is clear on every
+/// other row. [`LIGHT_KIND_MASK`] drops it, so the row stays a SKY row to every dispatch, the
+/// background and `table_has_sky`; only the `-D REFL=1` producers test it (`env_ibl.hlsli`'s
+/// `light_env_armed`, generated from `boyko_shaderdsl::ibl::LIGHT_FLAG_ENV`, which a test pins equal).
+pub const LIGHT_FLAG_ENV: u32 = 1 << 24;
 
 // ---- L1 cluster constants (mirror docs/LIGHTING-L0-L1-PLAN.md Decision 6) -------------
 
@@ -111,7 +117,9 @@ pub const fn cluster_index(x: u32, y: u32, z: u32) -> u32 {
 ///   TO the light, `dot(n, dir)`; SPOT: the SHINE axis, `dot(-l, dir)`) | unused
 ///   (POINT); `w` = bit-cast `u32` kind WORD: the kind tag ([`LIGHT_KIND_DIRECTIONAL`] etc.) in
 ///   bits `0..16`, and on a POINT/SPOT row the shadow-atlas fields above it — bit 16 set iff the
-///   row holds a real slot, the 5-bit slot in bits `17..22`, born [`SLOT_NONE_FIELD`].
+///   row holds a real slot, the 5-bit slot in bits `17..22`, born [`SLOT_NONE_FIELD`]. On the
+///   environment SKY row bit 24 is [`LIGHT_FLAG_ENV`] and `xyz` carries `(intensity, cos yaw,
+///   sin yaw)` ([`GpuLight::from_environment`]).
 /// - `pos_range` (off 16): `xyz` = world position (POINT/SPOT) | unused (DIRECTIONAL);
 ///   `w` = cull-sphere radius (POINT/SPOT) | `+inf` (DIRECTIONAL).
 /// - `color_cone` (off 32): `rgb` = LINEAR color × baked intensity (directional =
@@ -1410,13 +1418,39 @@ impl GpuLight {
     /// `color_cone.rgb` = `sky_color` (the upper-hemisphere term); `pos_range.xyz` =
     /// `ground_color` (the lower-hemisphere term). The L0a resolve computes
     /// `lerp(ground, sky, dot(N, up) * 0.5 + 0.5)` for the diffuse ambient + the analytic
-    /// env-BRDF specular against `sky_color`, both × AO. No `P` dependency (L0a).
+    /// env-BRDF specular against the steepened reflected sky/ground gradient, both × AO. No `P`
+    /// dependency (L0a). `dir_kind.xyz`, `pos_range.w` and `color_cone.w` stay 0 — the lanes the
+    /// environment row ([`Self::from_environment`]) fills.
     #[inline]
     pub fn from_sky(l: &SkyLight) -> Self {
         Self {
             dir_kind: [0.0, 0.0, 0.0, f32::from_bits(LIGHT_KIND_SKY)],
             pos_range: [l.ground_color[0], l.ground_color[1], l.ground_color[2], 0.0],
             color_cone: [l.sky_color[0], l.sky_color[1], l.sky_color[2], 0.0],
+        }
+    }
+
+    /// IBL1 R1 (D-P2d / D20): the ONE SKY row of an armed environment. The kind word is
+    /// `LIGHT_KIND_SKY | LIGHT_FLAG_ENV`; `dir_kind.xyz` = `(intensity, cos yaw, sin yaw)` (the
+    /// REFL producers' fetch scale and lookup rotation); `pos_range` = `(ground lane × intensity,
+    /// L1)` and `color_cone` = `(sky lane × intensity, tile)`, where the lanes are the map's
+    /// `E(∓y)/π` ([`ResolvedEnvironment`](crate::environment::ResolvedEnvironment)) — so the
+    /// background, the hemisphere diffuse and every non-REFL consumer read a sky/ground pair
+    /// consistent with the map. The caller passes a sanitized (finite, non-negative) `intensity`
+    /// and the yaw's cosine and sine.
+    #[inline]
+    #[must_use]
+    pub fn from_environment(
+        intensity: f32,
+        yaw_cos: f32,
+        yaw_sin: f32,
+        env: &crate::environment::ResolvedEnvironment,
+    ) -> Self {
+        let (s, g) = (env.sky_lane, env.ground_lane);
+        Self {
+            dir_kind: [intensity, yaw_cos, yaw_sin, f32::from_bits(LIGHT_KIND_SKY | LIGHT_FLAG_ENV)],
+            pos_range: [g[0] * intensity, g[1] * intensity, g[2] * intensity, env.l1() as f32],
+            color_cone: [s[0] * intensity, s[1] * intensity, s[2] * intensity, env.tile as f32],
         }
     }
 }

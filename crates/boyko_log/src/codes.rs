@@ -1041,6 +1041,12 @@ codes! {
     // mesh says nothing the first did not.
     (2208, W, W2208, RatePolicy::Once,  CodeStatus::Live,
         "Mesh geometry could not be allocated in device-local memory and stayed host-visible"),
+    // IBL1 R1 (D-P2e): the light fold's environment rule -- one code, FOUR per-condition latches
+    // (`W3005`'s two-site precedent: a first "unarmed" report must not silence a later conflict).
+    // `Once` per condition: each is a property of the world's setup, so its second fold says
+    // nothing the first did not.
+    (2209, W, W2209, RatePolicy::Once,  CodeStatus::Live,
+        "An EnvironmentLight was ignored, overridden or sanitized by the light fold"),
     // ── L8a: `boyko_image` ──────────────────────────────────────────────────────────────────
     // `Every` for both: each occurrence names a different chunk or a different stream, the decode
     // CONTINUES past them, and a file with two corrupt chunks is a different report from a file
