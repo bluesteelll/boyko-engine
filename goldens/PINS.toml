@@ -180,6 +180,29 @@ BOYKO_SHADOW_DENOISE     = "none"
 BOYKO_HOST_DUMP          = "D:\\tmp\\grand_showcase_2mat.bmp"
 RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
 
+[grand_showcase_2mat_ibl]
+# IBL1 R1 (ibl1/cut.md C12; rulings 117 + 123 (4)): [grand_showcase_2mat]'s five spheres with the
+# procedural studio environment ARMED (EnvironmentConfig { Studio }, an EnvironmentLight at
+# intensity 1, yaw 0): the boot builds the -D REFL=1 resolve, and the gold / blue metals mirror the
+# studio's panels through the existing split sum (two bilinear fetches of the prefiltered
+# 256x7 B10G11R11 octahedral chain, crates/boyko_render/assets/ibl/studio_256.envoct). Born PENDING
+# on both legs: the hashes are blessed after the orchestrator's W6 look (ibl1/cut.md section 5),
+# under the Khronos PBR Neutral default, in the merge script -- never by the developer stage.
+crate           = "boyko-app"
+test_binary     = "grand_showcase_2mat"
+test_name       = "grand_showcase_2mat_ibl_screenshot_dump"
+bmp             = "D:\\tmp\\grand_showcase_2mat_ibl.bmp"
+width           = 512
+height          = 512
+sha256_software = "PENDING"
+sha256_hwrt     = "PENDING"
+
+[grand_showcase_2mat_ibl.env]
+BOYKO_DISABLE_VALIDATION = "1"
+BOYKO_SHADOW_DENOISE     = "none"
+BOYKO_HOST_DUMP          = "D:\\tmp\\grand_showcase_2mat_ibl.bmp"
+RUSTUP_TOOLCHAIN         = "stable-x86_64-pc-windows-msvc"
+
 [deferred_sdf_only]
 # Multi-paradigm render-path plan, rung R3 (Deferred leg-disable, sdf leg): the SAME
 # grand_showcase room with resolved_render_path.mesh_leg forced OFF (GeometryLegs::Sdf). The

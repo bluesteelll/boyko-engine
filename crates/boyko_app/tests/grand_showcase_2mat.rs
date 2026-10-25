@@ -238,6 +238,35 @@ fn grand_showcase_2mat_screenshot_dump() {
 }
 
 // ===============================================================================================
+// IBL1 R1 (ibl1/cut.md C12): the environment pin
+// ===============================================================================================
+
+/// Spawns the environment light of [`grand_showcase_2mat_ibl_screenshot_dump`]: intensity 1 (the
+/// studio's `E(+y) = 1` normalization), yaw 0.
+fn spawn_environment_light(mut commands: Commands) {
+    commands.spawn(EnvironmentLight::new(1.0, 0.0));
+}
+
+/// **The environment pin** (`goldens/PINS.toml`'s `[grand_showcase_2mat_ibl]`, born PENDING and
+/// blessed after the orchestrator's W6 look, ruling 123 (4)): the pinned [`setup`] at 512² on
+/// Deferred × Mesh with `PER_INSTANCE_MATERIAL`, the procedural studio ARMED
+/// (`EnvironmentConfig { Studio }`, boot-frozen) and an `EnvironmentLight` spawned — so every lit
+/// pixel takes the `-D REFL=1` resolve's environment arm: the low-roughness gold and the blue metal
+/// mirror the studio's panels, the dielectrics keep their hemisphere diffuse with lanes derived from
+/// the map. The setup's `SkyLight` writes nothing (the environment row is the one sky row; the fold
+/// reports the conflict once, `boyko-W2209`). No eval knob is read.
+#[test]
+#[ignore = "gpu-windowed: needs a real windowed GPU device; the orchestrator runs it on the GPU to dump the IBL material-showcase pin"]
+fn grand_showcase_2mat_ibl_screenshot_dump() {
+    let mut app = App::new();
+    app.add_plugins(EnginePlugins::window("boyko_engine grand showcase materials (IBL)", 512, 512));
+    app.add_startup_system(setup);
+    app.add_startup_system(spawn_environment_light);
+    app.insert_resource(EnvironmentConfig { source: EnvSource::Studio });
+    app.run();
+}
+
+// ===============================================================================================
 // Render wave PX0 (H3 Scope 7; px0/cut.md D-A1): the AA REFERENCE pins
 // ===============================================================================================
 
