@@ -92,6 +92,11 @@
 //       -D MOTION_VECTORS=1 -Fo deferred_pbr_hwrt_vis_mv.comp.spv` — VIS plus the
 //       per-pixel camera-only motion vector the temporal shadow denoiser reprojects with;
 //       see compute.rs's `DEFERRED_PBR_VIS_MV_SPV` embed doc.)
+//   (IBL1 R1 REFL twins — the environment arm, +1 combined image sampler; add `-D REFL=1` to
+//       four of the rows above: `-Fo deferred_pbr_refl.comp.spv` (software), `-D TERMINATOR_WRAP=1
+//       -D REFL=1 -Fo deferred_pbr_wrap_refl.comp.spv`, `-T cs_6_5 -D HWRT=1 -D REFL=1
+//       -Fo deferred_pbr_hwrt_refl.comp.spv`, `-T cs_6_5 -D HWRT=1 -D SHADOW_STAGE=2 -D REFL=1
+//       -Fo deferred_pbr_hwrt_denoised_refl.comp.spv`. The VIS / VIS+MV rows have none.)
 
 static const float PI = 3.14159265358979323846;
 
@@ -596,6 +601,29 @@ float3 oct_decode(float2 e) {
 // INCLUDE CONTRACT). Permanent shared BRDF seam: later render paths `#include` the same
 // header instead of duplicating these terms.
 #include "pbr_lighting.hlsli"
+
+#ifdef REFL
+// IBL1 R1 (`-D REFL=1`, the interface axis — `docs/SHADER-VARIANT-MANIFEST.md`): the prefiltered
+// environment chain as ONE combined image sampler at the first binding past each resolve set —
+// software @20 (after `gPbr` @19), RESOLVE_INLINE-hwrt @22 (after `gDepthHw` @21), DENOISED @23
+// (after `gShadowVis` @22) — and the SKY branch's environment arm (`env_ibl.hlsli`, whose INCLUDE
+// CONTRACT is these two declarations). The VIS stages write no `lit` and have no REFL twin. With
+// `REFL` undefined this source preprocesses character-identical to the base, so every base `.spv`
+// is untouched by construction; an armed boot selects the REFL twin INSTEAD of the base.
+#if SHADOW_STAGE == SHADOW_STAGE_VIS
+#error "REFL: the VIS stage writes no lit and has no REFL variant"
+#endif
+#if HWRT && SHADOW_STAGE == SHADOW_STAGE_RESOLVE_DENOISED
+#define ENV_MAP_BINDING 23
+#elif HWRT
+#define ENV_MAP_BINDING 22
+#else
+#define ENV_MAP_BINDING 20
+#endif
+[[vk::binding(ENV_MAP_BINDING)]] Texture2D<float4> gEnvMap;
+[[vk::binding(ENV_MAP_BINDING)]] SamplerState gEnvSamp;
+#include "env_ibl.hlsli"
+#endif
 
 // === Render terminator-softening — PREPROCESSOR VARIANT `TERMINATOR_WRAP` (frozen-base
 // discipline, mirrors `gbuffer_mrt.fs.hlsl`'s `#ifdef`/`#else`/`#endif` convention) ===========
@@ -1237,6 +1265,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
                 // (`pbr_lighting.hlsli`).
                 float3 sky_color = L.color;       // upper hemisphere
                 float3 ground_color = L.pos;      // lower hemisphere (packed in pos lane)
+#ifdef REFL
+                if (light_env_armed(L)) {
+                    // IBL1 R1: the prefiltered environment replaces the reflected hemisphere gradient — the
+                    // dominant direction (rotated by the row's yaw), two bilinear fetches at integer levels.
+                    float3 env_spec = env_specular(spec_dominant_dir(n, R, roughness), roughness, L);
+                    ambient += eval_pbr_ambient_env(surf, dfg_v, env_spec, sky_color, ground_color, hemi, ao_final, spec_ao);
+                } else
+#endif
                 ambient += eval_pbr_ambient_hemi(surf, R, dfg_v, sky_color, ground_color, hemi, ao_final, spec_ao);
             }
             // Point/spot (kinds 1/2) are the L0b block — not in the L0a front block.

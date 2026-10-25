@@ -39,6 +39,8 @@ mod shaders;
 mod vb;
 mod prims;
 mod post;
+// IBL1 R1: the env_ibl.hlsli leaves.
+mod ibl;
 
 pub use depth::*;
 pub use face::*;
@@ -46,6 +48,7 @@ pub use shaders::*;
 pub use vb::*;
 pub use prims::*;
 pub use post::*;
+pub use ibl::*;
 
 thread_local! {
     /// The build-time SSA arena. Recorded into by [`Emit`]'s [`FieldScalar`] ops,

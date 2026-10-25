@@ -116,5 +116,12 @@ path = "src/bin/post_eval.rs"
 name = "bake_ibl_studio"
 path = "src/bin/bake_ibl_studio.rs"
 
+# IBL1 R1 (ibl1/cut.md C10): prints the env_ibl.hlsli leaves traced from boyko_shaderdsl::ibl, the span
+# `boyko_rhi_vulkan/tests/env_ibl_edsl_sync.rs` pins.
+[[bin]]
+name = "emit_env_ibl"
+path = "src/bin/emit_env_ibl.rs"
+required-features = ["emit"]
+
 [lints]
 workspace = true

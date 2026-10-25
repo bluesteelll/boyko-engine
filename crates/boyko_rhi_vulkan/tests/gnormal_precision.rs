@@ -614,14 +614,19 @@ fn gnormal_layout_census() {
 
 // ---- T-N6 ------------------------------------------------------------------------------------
 
-/// The committed modules that declare `gNormal` (the Deferred normal).
-const GNORMAL_MODULES: [&str; 11] = [
+/// The committed modules that declare `gNormal` (the Deferred normal) — incl. the four IBL1
+/// `-D REFL=1` resolve twins, which read it exactly as their base rows.
+const GNORMAL_MODULES: [&str; 15] = [
     "deferred_pbr.comp.spv",
     "deferred_pbr_hwrt.comp.spv",
     "deferred_pbr_hwrt_denoised.comp.spv",
+    "deferred_pbr_hwrt_denoised_refl.comp.spv",
+    "deferred_pbr_hwrt_refl.comp.spv",
     "deferred_pbr_hwrt_vis.comp.spv",
     "deferred_pbr_hwrt_vis_mv.comp.spv",
+    "deferred_pbr_refl.comp.spv",
     "deferred_pbr_wrap.comp.spv",
+    "deferred_pbr_wrap_refl.comp.spv",
     "sdf_gbuffer_composite.comp.spv",
     "sdf_ssao_high.comp.spv",
     "sdf_ssao_low.comp.spv",

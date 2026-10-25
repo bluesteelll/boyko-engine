@@ -851,6 +851,64 @@ pub fn write_env_blob(params: &EnvBakeParams<'_>, stats: &EnvBakeStats, chain: &
     }
 }
 
+// ---- The host model of the read side (`env_ibl.hlsli`'s `env_specular`) ---------------------------
+
+/// The bilinear read of level `k` (side `n`, at word offset `off`) of a decoded chain at `uv` — the
+/// GPU's linear filter at texel centres (`t = uv·n − ½`), clamped to the level.
+fn chain_bilinear(chain: &[u32], off: usize, n: u32, uv: [f32; 2]) -> [f32; 3] {
+    let tx = uv[0] * n as f32 - 0.5;
+    let ty = uv[1] * n as f32 - 0.5;
+    // `uv` lies in the interior `[1/n, 1 − 1/n]`, so `t ≥ ½` and the cast truncates a positive value.
+    let x0 = (tx.max(0.0) as u32).min(n - 1);
+    let y0 = (ty.max(0.0) as u32).min(n - 1);
+    let x1 = (x0 + 1).min(n - 1);
+    let y1 = (y0 + 1).min(n - 1);
+    let wx = (tx - x0 as f32).clamp(0.0, 1.0);
+    let wy = (ty - y0 as f32).clamp(0.0, 1.0);
+    let at = |x: u32, y: u32| crate::pixfmt::unpack_b10g11r11(chain[off + (y * n + x) as usize]);
+    let (c00, c10, c01, c11) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+    core::array::from_fn(|c| {
+        let top = c00[c] + (c10[c] - c00[c]) * wx;
+        let bottom = c01[c] + (c11[c] - c01[c]) * wx;
+        top + (bottom - top) * wy
+    })
+}
+
+/// The host model of `env_ibl.hlsli`'s `env_specular` over a chain's words (level-major, as the
+/// blob stores them): `dir` rotated by the yaw ([`env_yaw_rotate_body`]), the lod
+/// [`env_lod_body`]`(pr, L1)`, levels `⌊lod⌋` and `⌊lod⌋ + 1` (clamped to L1) read bilinearly at
+/// THEIR OWN UVs ([`oct_env_uv_body`]), lerped, × `intensity`. The device tests' oracle; its residual
+/// against a GPU is the filter's 8-bit subtexel weights and the B10G11R11 / f16 steps.
+///
+/// # Panics
+/// If `chain` is shorter than the `tile` × `levels` chain.
+#[allow(clippy::too_many_arguments)] // one argument per lane of the SKY row the shader reads
+#[must_use]
+pub fn env_specular_host(
+    chain: &[u32],
+    tile: u32,
+    levels: u32,
+    dir: [f32; 3],
+    pr: f32,
+    intensity: f32,
+    yaw_cos: f32,
+    yaw_sin: f32,
+) -> [f32; 3] {
+    assert!(chain.len() >= env_chain_words(tile, levels), "invariant: the chain holds every level");
+    let l1 = (levels - 1) as f32;
+    let d = env_yaw_rotate_body::<f32>(dir, yaw_cos, yaw_sin);
+    let lod = env_lod_body::<f32>(pr, l1).min(l1).max(0.0);
+    let k0 = lod as u32;
+    let k1 = (k0 + 1).min(levels - 1);
+    let f = lod - k0 as f32;
+    let offset = |k: u32| env_chain_words(tile, k);
+    let n0 = tile >> k0;
+    let n1 = tile >> k1;
+    let c0 = chain_bilinear(chain, offset(k0), n0, oct_env_uv_body::<f32>(d, n0 as f32));
+    let c1 = chain_bilinear(chain, offset(k1), n1, oct_env_uv_body::<f32>(d, n1 as f32));
+    core::array::from_fn(|c| (c0[c] + (c1[c] - c0[c]) * f) * intensity)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1410,6 +1468,40 @@ mod tests {
             let rgb = crate::pixfmt::unpack_b10g11r11(w);
             for c in rgb {
                 assert!((c - 1.0).abs() <= 1.0 / 32.0, "texel {i}: {rgb:?} is not within one step of 1");
+            }
+        }
+    }
+    /// The host model of `env_specular` reads level `⌊lod⌋` and `⌊lod⌋ + 1` and lerps them by the
+    /// lod's fraction, × intensity: over a chain whose every level holds its own constant the result
+    /// is exactly that lerp (a bilinear of equal texels is the texel), at every lod including the
+    /// clamped last level, under any yaw. Reading `⌊lod⌋` twice (the upper fetch not stepped) or one
+    /// level at a shared UV is what this pins.
+    #[test]
+    fn env_specular_host_lerps_two_levels() {
+        let (tile, levels) = (32u32, 4u32);
+        let consts = [[0.25f32, 0.5, 0.75], [1.0, 2.0, 4.0], [8.0, 0.125, 16.0], [0.5, 0.5, 2.0]];
+        let mut chain = vec![0u32; env_chain_words(tile, levels)];
+        let mut off = 0usize;
+        for (k, c) in consts.iter().enumerate() {
+            let n = (tile >> k) as usize;
+            let word = pack_b10g11r11(*c, Rounding::NearestEven);
+            assert_eq!(crate::pixfmt::unpack_b10g11r11(word), *c, "level {k}'s constant is exact");
+            chain[off..off + n * n].fill(word);
+            off += n * n;
+        }
+        let l1 = (levels - 1) as f32;
+        for step in 0..=40 {
+            let pr = step as f32 / 40.0;
+            let lod = env_lod_body::<f32>(pr, l1).min(l1).max(0.0);
+            let (k0, f) = (lod as usize, lod - (lod as usize) as f32);
+            let k1 = (k0 + 1).min(levels as usize - 1);
+            for (i, dir) in [[0.3f32, 0.9, -0.2], [-0.7, -0.1, 0.7], [0.0, -1.0, 0.0]].into_iter().enumerate() {
+                let (c, s) = [(1.0, 0.0), (0.6, 0.8), (-0.28, 0.96)][i];
+                let got = env_specular_host(&chain, tile, levels, dir, pr, 1.5, c, s);
+                for ch in 0..3 {
+                    let want = (consts[k0][ch] + (consts[k1][ch] - consts[k0][ch]) * f) * 1.5;
+                    assert!((got[ch] - want).abs() <= 1e-5 * want.max(1.0), "pR {pr}: channel {ch} {} vs {want}", got[ch]);
+                }
             }
         }
     }

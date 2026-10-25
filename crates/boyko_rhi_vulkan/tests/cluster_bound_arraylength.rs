@@ -68,13 +68,18 @@ use std::process::Command;
 /// bare name list made the failure messages give the wrong advice about them — *"its `use_clusters`
 /// guard is no longer allocation-derived"* is simply false of a shader that has no `use_clusters`.
 /// The purpose now travels with the name, so the message can be right about both.
-const BOUND_BY_ARRAYLENGTH: [(&str, &str); 11] = [
+const BOUND_BY_ARRAYLENGTH: [(&str, &str); 19] = [
     ("cluster_cull.comp.spv", "the froxel light-index list's own capacity"),
     ("deferred_pbr.comp.spv", "the froxel light walk's `use_clusters` guard"),
     ("deferred_pbr_hwrt.comp.spv", "the froxel light walk's `use_clusters` guard"),
     ("deferred_pbr_hwrt_denoised.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("deferred_pbr_hwrt_denoised_refl.comp.spv", "as its base row — the IBL1 `-D REFL=1` twin (the environment arm adds no descriptor query)"),
+    ("deferred_pbr_hwrt_refl.comp.spv", "as its base row — the IBL1 `-D REFL=1` twin (the environment arm adds no descriptor query)"),
+    ("deferred_pbr_refl.comp.spv", "as its base row — the IBL1 `-D REFL=1` twin (the environment arm adds no descriptor query)"),
     ("deferred_pbr_wrap.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("deferred_pbr_wrap_refl.comp.spv", "as its base row — the IBL1 `-D REFL=1` twin (the environment arm adds no descriptor query)"),
     ("forward_opaque_froxel.fs.spv", "the froxel light walk's `use_clusters` guard"),
+    ("forward_opaque_froxel_refl.fs.spv", "as its base row — the IBL1 `-D REFL=1` twin (the environment arm adds no descriptor query)"),
     (
         "vb_batch_cull.comp.spv",
         "`VbLateCount`'s RESERVED TAIL SLOT — VG R3 stamps the observed frame index into the last \
@@ -87,8 +92,11 @@ const BOUND_BY_ARRAYLENGTH: [(&str, &str); 11] = [
         "as `vb_batch_cull.comp.spv` — the `-D DEBUG` variant of one source",
     ),
     ("vb_resolve_froxel.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("vb_resolve_froxel_refl.comp.spv", "as its base row — the IBL1 `-D REFL=1` twin (the environment arm adds no descriptor query)"),
     ("vb_shade_froxel.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("vb_shade_froxel_refl.comp.spv", "as its base row — the IBL1 `-D REFL=1` twin (the environment arm adds no descriptor query)"),
     ("vb_shade_tex_froxel.comp.spv", "the froxel light walk's `use_clusters` guard"),
+    ("vb_shade_tex_froxel_refl.comp.spv", "as its base row — the IBL1 `-D REFL=1` twin (the environment arm adds no descriptor query)"),
 ];
 
 /// Locates `spirv-dis`: the pinned Vulkan-SDK path first (the repo's offline recipe), then

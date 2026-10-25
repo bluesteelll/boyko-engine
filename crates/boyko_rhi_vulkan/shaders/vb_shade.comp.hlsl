@@ -81,6 +81,8 @@
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T cs_6_0 -E main \
 //       -fspv-target-env=vulkan1.3 vb_shade.comp.hlsl -Fo vb_shade.comp.spv
 //   (TEXTURED variant: add `-D TEXTURED=1 -Fo vb_shade_tex.comp.spv`)
+//   (IBL1 R1 REFL twins: add `-D REFL=1` to the base, FROXEL, TEXTURED and TEXTURED+FROXEL rows,
+//       `-Fo` the same name with `_refl` before `.comp.spv` — the environment arm at Set 1 @4.)
 // Validated with:
 //   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe vb_shade.comp.spv
 //   C:\VulkanSDK\1.4.350.0\Bin\spirv-val.exe vb_shade_tex.comp.spv
@@ -179,6 +181,17 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 
 #include "pbr_lighting.hlsli"
 #include "light_table.hlsli"
+
+#ifdef REFL
+// IBL1 R1 (`-D REFL=1`, the interface axis — `docs/SHADER-VARIANT-MANIFEST.md`): the prefiltered
+// environment chain as ONE combined image sampler at Set 1 @4 (`forward_layout1`'s fifth entry on an armed boot), and the SKY branch's environment
+// arm (`env_ibl.hlsli`, whose INCLUDE CONTRACT is these two declarations). With `REFL` undefined
+// this source preprocesses character-identical to the base, so the base `.spv` is untouched by
+// construction; an armed boot selects the REFL twin INSTEAD of the base (boot-frozen).
+[[vk::binding(4, 1)]] Texture2D<float4> gEnvMap;
+[[vk::binding(4, 1)]] SamplerState gEnvSamp;
+#include "env_ibl.hlsli"
+#endif
 
 // Multi-paradigm render-path plan, rungs VB-P1a (the seam) + VB-P1b (armed) + VB-P1c (this
 // classified variant): the froxel cluster-grid pair, Set 0 bindings 8/9 -- compiled in ONLY for
@@ -521,6 +534,14 @@ void main(uint3 tid : SV_DispatchThreadID, uint3 gid : SV_GroupID) {
         } else if (light_kind(L) == LIGHT_KIND_SKY) {
             float3 sky_color = L.color;
             float3 ground_color = L.pos;
+#ifdef REFL
+            if (light_env_armed(L)) {
+                // IBL1 R1: the prefiltered environment replaces the reflected hemisphere gradient — the
+                // dominant direction (rotated by the row's yaw), two bilinear fetches at integer levels.
+                float3 env_spec = env_specular(spec_dominant_dir(n, R, roughness), roughness, L);
+                ambient += eval_pbr_ambient_env(surf, dfg_v, env_spec, sky_color, ground_color, hemi, ao_final, spec_ao);
+            } else
+#endif
             ambient += eval_pbr_ambient_hemi(surf, R, dfg_v, sky_color, ground_color, hemi, ao_final, spec_ao);
         }
     }

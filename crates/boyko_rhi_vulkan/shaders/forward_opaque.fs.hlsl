@@ -77,6 +77,8 @@
 //       -fspv-target-env=vulkan1.3 forward_opaque.fs.hlsl -Fo forward_opaque.fs.spv
 //   C:\VulkanSDK\1.4.350.0\Bin\dxc.exe -spirv -T ps_6_0 -E main -D FROXEL=1 \
 //       -fspv-target-env=vulkan1.3 forward_opaque.fs.hlsl -Fo forward_opaque_froxel.fs.spv
+//   (IBL1 R1 REFL twins: add `-D REFL=1` to both rows, `-Fo forward_opaque_refl.fs.spv` /
+//       `-Fo forward_opaque_froxel_refl.fs.spv` — the environment arm at Set 1 @4.)
 // The FIRST invocation (no `-D`) is the base `Forward` variant — byte-identical to its pre-R5
 // build (verified `cmp`); the SECOND is the `ForwardPlus` froxel variant (`#ifdef FROXEL` below).
 
@@ -86,6 +88,18 @@ static const float3 LIGHT_UP = float3(0.0, 1.0, 0.0);
 
 #include "pbr_lighting.hlsli"
 #include "light_table.hlsli"
+
+#ifdef REFL
+// IBL1 R1 (`-D REFL=1`, the interface axis — `docs/SHADER-VARIANT-MANIFEST.md`): the prefiltered
+// environment chain as ONE combined image sampler at Set 1 @4 (the first binding past `forward_layout1`'s shadow set, which an armed
+// boot builds with this fifth `FRAGMENT | COMPUTE` entry), and the SKY branch's environment
+// arm (`env_ibl.hlsli`, whose INCLUDE CONTRACT is these two declarations). With `REFL` undefined
+// this source preprocesses character-identical to the base, so the base `.spv` is untouched by
+// construction; an armed boot selects the REFL twin INSTEAD of the base (boot-frozen).
+[[vk::binding(4, 1)]] Texture2D<float4> gEnvMap;
+[[vk::binding(4, 1)]] SamplerState gEnvSamp;
+#include "env_ibl.hlsli"
+#endif
 #include "lit_format.hlsli"
 
 // --- Set 0 (Forward core, §G): Camera / light table / material SSBO -----------------------
@@ -334,6 +348,14 @@ float4 main(PsIn input, bool is_front : SV_IsFrontFace) : SV_Target0 {
         } else if (light_kind(L) == LIGHT_KIND_SKY) {
             float3 sky_color = L.color;       // upper hemisphere
             float3 ground_color = L.pos;      // lower hemisphere (packed in the pos lane)
+#ifdef REFL
+            if (light_env_armed(L)) {
+                // IBL1 R1: the prefiltered environment replaces the reflected hemisphere gradient — the
+                // dominant direction (rotated by the row's yaw), two bilinear fetches at integer levels.
+                float3 env_spec = env_specular(spec_dominant_dir(n, R, roughness), roughness, L);
+                ambient += eval_pbr_ambient_env(surf, dfg_v, env_spec, sky_color, ground_color, hemi, ao_final, spec_ao);
+            } else
+#endif
             ambient += eval_pbr_ambient_hemi(surf, R, dfg_v, sky_color, ground_color, hemi, ao_final, spec_ao);
         }
         // Point/spot (kinds 1/2) are the L0b block below, not this front block.

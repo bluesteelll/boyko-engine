@@ -22,6 +22,7 @@ has no variant axis".)
 | `SHADOW_STAGE` | `RESOLVE_INLINE` (unset/0), `VIS` (1), `DENOISED` (2) | How the mesh shadow term is produced/consumed. INLINE combines the trace into lighting directly; VIS **writes** `gShadowVis` (the à-trous/temporal pre-pass) and strips lighting; DENOISED **reads** the final denoised `gShadowVis` and combines it. |
 | `HWRT` | unset (0), `1` | 0 = software SDF-marched mesh shadows (no ray HW). 1 = hardware inline `rayQuery` against a TLAS — adds `OpCapability RayQueryKHR`, the acceleration-structure descriptor, and **requires `-T cs_6_5`** (vs `cs_6_0`). Gated by `feature = "hwrt"` + a runtime `ctx.ray_query_enabled()`. |
 | `MOTION_VECTORS` | unset (0), `1` | 0 = no motion output. 1 = also emit per-pixel motion (Δuv) for the temporal shadow denoiser — a new storage binding (deferred) or a 4th MRT (gbuffer). Static camera ⇒ (0,0). |
+| `REFL` (IBL1 R1) | unset (0), `1` | An INTERFACE axis on the 20 `lit`-writing producer variants: 1 = **+1 combined image sampler** (`gEnvMap` + `gEnvSamp`, the prefiltered environment chain, at the first binding past each set) and the SKY branch's environment arm (`env_ibl.hlsli`). Boot-selected (`ResolvedEnvironment::armed`, `LitProducer::spirv`): an armed boot builds the REFL twin INSTEAD of the base, so the pipeline count does not change; an unarmed boot builds the base, whose source preprocesses character-identical with `REFL` undefined. The VIS / VIS+MV deferred stages have no REFL row (they write no `lit`). Rows: the IBL1 R1 section below. |
 
 ## `deferred_pbr.hlsl` — the fullscreen deferred resolve (compute)
 
@@ -1160,6 +1161,44 @@ reads `gThinNormal`, untouched).
 committed modules' declared formats against `GNORMAL_FORMAT` / `VB_THIN_NORMAL_FORMAT` (T-N6; a format census,
 not a byte gate), and the Rust bind / record side of the shared à-trous (T-N7). `lit_format_census.rs` classifies the five mesh-MRT
 pipelines: their `color_formats` must name `GBUFFER_MRT_COLOR_FORMATS`, the array the rings are created from.
+
+## IBL1 R1 — the REFL axis (20 rows, no base row moved)
+
+Twenty `-D REFL=1` twins (`ibl1/cut.md` C10, D-P2b), one per `lit`-writing producer variant. Each is its base row's
+recipe plus `-D REFL=1`; the shared environment header `env_ibl.hlsli` carries the eDSL-generated leaves
+(`boyko_shaderdsl::ibl`, between its `GENERATED env_ibl` sentinels) and the hand two-level fetch. The base rows'
+`.spv` are byte-unchanged: with `REFL` undefined each source preprocesses character-identical to the pre-IBL1 text,
+and no recipe carries debug line info. Each REFL module is its base + one combined image sampler + exactly two
+more `OpImageSampleExplicitLod` (the environment's two per-level fetches) — rule (xviii)'s anti-vacuity marker;
+the body-out twin of every REFL row IS its base row.
+
+| Source | Base row | Base `.spv` | REFL `.spv` | dxc `-T` | `-D` | Environment binding |
+|---|---|---|---|---|---|---|
+| `deferred_pbr.hlsl` | RESOLVE_INLINE (software) | `deferred_pbr.comp.spv` | `deferred_pbr_refl.comp.spv` | `cs_6_0` | `-D REFL=1` | @20 (set 0, after `gPbr` @19): 21 entries |
+| `deferred_pbr.hlsl` | TERMINATOR_WRAP (software) | `deferred_pbr_wrap.comp.spv` | `deferred_pbr_wrap_refl.comp.spv` | `cs_6_0` | `-D TERMINATOR_WRAP=1 -D REFL=1` | @20: 21 entries (the software REFL layout) |
+| `deferred_pbr.hlsl` | RESOLVE_INLINE (hardware) | `deferred_pbr_hwrt.comp.spv` | `deferred_pbr_hwrt_refl.comp.spv` | `cs_6_5` | `-D HWRT=1 -D REFL=1` | @22 (after `gDepthHw` @21): 23 entries |
+| `deferred_pbr.hlsl` | DENOISED | `deferred_pbr_hwrt_denoised.comp.spv` | `deferred_pbr_hwrt_denoised_refl.comp.spv` | `cs_6_5` | `-D HWRT=1 -D SHADOW_STAGE=2 -D REFL=1` | @23 (after `gShadowVis` @22): its OWN 24-entry layout; VIS keeps the 23 (ruling 123 (1)) |
+| `forward_opaque.fs.hlsl` | base | `forward_opaque.fs.spv` | `forward_opaque_refl.fs.spv` | `ps_6_0` | `-D REFL=1` | set 1 @4 (`forward_layout1`, 5 entries, `FRAGMENT \| COMPUTE`) |
+| `forward_opaque.fs.hlsl` | froxel | `forward_opaque_froxel.fs.spv` | `forward_opaque_froxel_refl.fs.spv` | `ps_6_0` | `-D FROXEL=1 -D REFL=1` | set 1 @4 |
+| `sdf_forward_march.comp.hlsl` | HAS_MESH | `sdf_forward_march.comp.spv` | `sdf_forward_march_refl.comp.spv` | `cs_6_0` | `-D HAS_MESH=1 -D REFL=1` | set 1 @4 |
+| `sdf_forward_march.comp.hlsl` | SDF-only | `sdf_forward_march_sdfonly.comp.spv` | `sdf_forward_march_sdfonly_refl.comp.spv` | `cs_6_0` | `-D REFL=1` | set 1 @4 |
+| `sdf_forward_march.comp.hlsl` | HAS_MESH + VIEWT | `sdf_forward_march_viewt.comp.spv` | `sdf_forward_march_viewt_refl.comp.spv` | `cs_6_0` | `-D HAS_MESH=1 -D VIEWT=1 -D REFL=1` | set 1 @4 |
+| `sdf_forward_march.comp.hlsl` | SDF-only + VIEWT | `sdf_forward_march_sdfonly_viewt.comp.spv` | `sdf_forward_march_sdfonly_viewt_refl.comp.spv` | `cs_6_0` | `-D VIEWT=1 -D REFL=1` | set 1 @4 |
+| `vb_resolve.comp.hlsl` | base | `vb_resolve.comp.spv` | `vb_resolve_refl.comp.spv` | `cs_6_0` | `-D REFL=1` | set 1 @4 |
+| `vb_resolve.comp.hlsl` | froxel | `vb_resolve_froxel.comp.spv` | `vb_resolve_froxel_refl.comp.spv` | `cs_6_0` | `-D FROXEL=1 -D REFL=1` | set 1 @4 |
+| `vb_shade.comp.hlsl` | base | `vb_shade.comp.spv` | `vb_shade_refl.comp.spv` | `cs_6_0` | `-D REFL=1` | set 1 @4 |
+| `vb_shade.comp.hlsl` | froxel | `vb_shade_froxel.comp.spv` | `vb_shade_froxel_refl.comp.spv` | `cs_6_0` | `-D FROXEL=1 -D REFL=1` | set 1 @4 |
+| `vb_shade.comp.hlsl` | TEXTURED | `vb_shade_tex.comp.spv` | `vb_shade_tex_refl.comp.spv` | `cs_6_0` | `-D TEXTURED=1 -D REFL=1` | set 1 @4 |
+| `vb_shade.comp.hlsl` | TEXTURED + froxel | `vb_shade_tex_froxel.comp.spv` | `vb_shade_tex_froxel_refl.comp.spv` | `cs_6_0` | `-D TEXTURED=1 -D FROXEL=1 -D REFL=1` | set 1 @4 |
+| `vb_shade_split.comp.hlsl` | base | `vb_shade_split.comp.spv` | `vb_shade_split_refl.comp.spv` | `cs_6_0` | `-D REFL=1` | set 1 @9 (`vb_split_layout1`: a gap at @8 on `not(hwrt)`) |
+| `vb_shade_split.comp.hlsl` | TEXTURED | `vb_shade_split_tex.comp.spv` | `vb_shade_split_tex_refl.comp.spv` | `cs_6_0` | `-D TEXTURED=1 -D REFL=1` | set 1 @9 |
+| `vb_shade_split.comp.hlsl` | HWRT | `vb_shade_split_hwrt.comp.spv` | `vb_shade_split_hwrt_refl.comp.spv` | `cs_6_0` | `-D HWRT=1 -D REFL=1` | set 1 @9 (after `gShadowVis` @8): 10 entries |
+| `vb_shade_split.comp.hlsl` | TEXTURED + HWRT | `vb_shade_split_tex_hwrt.comp.spv` | `vb_shade_split_tex_hwrt_refl.comp.spv` | `cs_6_0` | `-D TEXTURED=1 -D HWRT=1 -D REFL=1` | set 1 @9 |
+
+*Byte gates:* `boyko_rhi_vulkan/tests/env_ibl_edsl_sync.rs` (the generated span, the 20 re-DXCs, the +2 fetch
+census), `refl_six_site_census.rs` (the arm on all six sources under `#ifdef REFL`, these 20 rows). The base rows'
+own `*_spv_sync` gates stay green with no committed-byte change. *Selection:* `boyko_rhi_vulkan::compute::LitProducer`
+(`boyko_app/tests/ibl_boot_selection.rs`).
 
 ## Why these stay N `.spv` (do NOT try to spec-const-collapse)
 
