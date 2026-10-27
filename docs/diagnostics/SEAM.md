@@ -863,7 +863,10 @@ a change to the topology.
 > `shipping-min` 0 · `off` 0; `custom` takes `BOYKO_GPU_CRASH_DIAG_MAX`. A `0` is a `const false`
 > at the head of every GB site's gate, so the sites, their cold bodies and the extension entry-point
 > names are absent from the image — `boyko_app/tests/gpu_crash_shipping_census.rs` byte-scans a
-> `shipping` and a `dev` build of the `clear` example for those names.
+> `shipping` and a `dev` build of the `clear` example for those names and for a literal only a
+> GB per-frame cold body references (the names alone fold through the level clamp even when a
+> site does not), and two `const` assertions in `boyko_rhi_vulkan/src/gpu_crash.rs` pin
+> `COMPILED_IN` to the axis in every profile's build, `profile-legs` included.
 
 - **`BOYKO_PROFILING_TIER` / `BOYKO_PROFILING_REGION_CAPACITY` / `BOYKO_PROFILING_DYN_CAP` /
   `BOYKO_LOG_MAX_LEVEL` / `BOYKO_GPU_CRASH_DIAG_MAX` survive ONLY under `BOYKO_PROFILE=custom`.**

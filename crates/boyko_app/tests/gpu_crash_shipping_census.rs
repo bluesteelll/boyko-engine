@@ -5,8 +5,19 @@
 //! the sites, their `#[cold]` bodies and the extension entry points they would load are then NOT
 //! IN THE BINARY. This test builds the `clear` example — the smallest program that links the
 //! windowed runner and `render_gbuffer_frame` — twice, under `BOYKO_PROFILE=dev` and `=shipping`,
-//! each into its own target directory, and byte-scans each image for the NUL-terminated names only
-//! GB loads.
+//! each into its own target directory, and byte-scans each image for two kinds of witness:
+//!
+//! - the NUL-terminated names only GB loads (its entry points and device extensions);
+//! - a string literal only a GB per-frame `#[cold]` BODY references (the frame scope's label,
+//!   reached only through the funnels' and host steps' scope entry).
+//!
+//! The second kind exists because the first cannot see the sites (GB review r1 F3): the loads fold
+//! through `GpuCrashDiagLevel::effective()`'s own `const` clamp, so with `COMPILED_IN` forced
+//! `true` every loader name still reads `shipping 0` while the per-frame sites and their bodies
+//! come back (+46 KB of image). A body literal comes back with its body.
+//!
+//! `COMPILED_IN` itself is pinned at compile time (`boyko_rhi_vulkan/src/gpu_crash.rs`'s two
+//! `const` assertions), which the nested `shipping` build below evaluates like CI's `profile-legs`.
 //!
 //! # Why a byte scan of the image
 //!
@@ -17,8 +28,8 @@
 //!
 //! # The verdict
 //!
-//! - the `dev` image holds EVERY name — the positive control; a zero there means the scanner (or
-//!   the subject) went blind, which is RED, never a pass;
+//! - the `dev` image holds EVERY name and EVERY body literal — the positive control; a zero there
+//!   means the scanner (or the subject) went blind, which is RED, never a pass;
 //! - the `shipping` image holds NONE of them.
 //!
 //! RED shown at the rung: replace `boot_with_instance`'s `COMPILED_IN && level != Off` gate on the
@@ -26,6 +37,10 @@
 //! `core::hint::black_box(true)` — a loader whose gate the ceiling no longer folds — and the
 //! shipping image holds every entry-point name. (Replacing the call's gate alone stays green: the
 //! instance-side `want_labels` is folded too, so the loads stay dead. Two folds, each sufficient.)
+//!
+//! RED shown at review round 1 (F3): drop `COMPILED_IN &&` from `Renderer::crumbs_armed` and the
+//! shipping image holds the per-frame body literal while every loader name still reads 0; force
+//! `COMPILED_IN` to `true` and the nested `shipping` build fails on the `const` assertion.
 //!
 //! # Running it
 //!
@@ -55,6 +70,18 @@ const GB_ONLY_NAMES: &[&str] = &[
     "VK_NV_device_diagnostic_checkpoints",
     "VK_EXT_device_fault",
 ];
+
+/// String literals only a GB `#[cold]` body references. Rust literals carry no NUL, so these are
+/// counted as plain byte runs; each is unique in the tree.
+/// - `frame_forward_plus`: `present/gpu_crumbs.rs`'s `FRAME_LABELS`, read only by the frame
+///   scope's opening inside `enter_scope` — the per-frame bodies (`crumb_enter_pass`,
+///   `crumb_enter_host`). An indexed table, so the literal stays a byte run in `.rdata`.
+///
+/// A literal whose only use is a copy at a known index is not a witness: `CrumbState::new`'s
+/// command-buffer name `frame_cmd_0` is copied into a fixed label buffer, and the measured `dev`
+/// image holds no `frame_cmd_0` run at all (review r1, F3's first green run, where this positive
+/// control caught it; the copy of a constant most likely became immediate stores).
+const GB_BODY_LITERALS: &[&str] = &["frame_forward_plus"];
 
 /// Every per-knob override the profile axis honours only under `custom`: a stray one beside a
 /// named profile is a `compile_error!`, so the nested builds must not inherit any.
@@ -101,7 +128,12 @@ fn build_clear(profile: &str) -> PathBuf {
 fn count_cstr(bytes: &[u8], name: &str) -> usize {
     let mut needle = name.as_bytes().to_vec();
     needle.push(0);
-    bytes.windows(needle.len()).filter(|w| *w == needle.as_slice()).count()
+    count_bytes(bytes, &needle)
+}
+
+/// How many times `needle` occurs in `bytes` (overlapping runs counted).
+fn count_bytes(bytes: &[u8], needle: &[u8]) -> usize {
+    bytes.windows(needle.len()).filter(|w| *w == needle).count()
 }
 
 #[test]
@@ -120,6 +152,18 @@ fn gb_sites_are_absent_from_shipping() {
             red.push(format!("{name}: present {s}x in the SHIPPING image -- a GB site survived the ceiling"));
         }
     }
+    for lit in GB_BODY_LITERALS {
+        let (d, s) = (count_bytes(&dev, lit.as_bytes()), count_bytes(&shipping, lit.as_bytes()));
+        println!("[GB-census] body literal {lit}: dev {d}, shipping {s}");
+        if d == 0 {
+            red.push(format!("body literal {lit}: absent from the DEV image -- the positive control is blind"));
+        }
+        if s != 0 {
+            red.push(format!(
+                "body literal {lit}: present {s}x in the SHIPPING image -- a GB #[cold] body survived the ceiling"
+            ));
+        }
+    }
     println!("[GB-census] dev image {} B, shipping image {} B", dev.len(), shipping.len());
     assert!(red.is_empty(), "GB zero-cost census:\n{}", red.join("\n"));
 }
@@ -129,4 +173,12 @@ fn the_scanner_counts_nul_terminated_names_only() {
     let bytes = b"xxvkCmdEndDebugUtilsLabelEXT\0vkCmdEndDebugUtilsLabelEXTZ\0";
     assert_eq!(count_cstr(bytes, "vkCmdEndDebugUtilsLabelEXT"), 1);
     assert_eq!(count_cstr(b"", "vkCmdEndDebugUtilsLabelEXT"), 0);
+}
+
+#[test]
+fn the_scanner_counts_body_literals_without_a_nul() {
+    let bytes = b"frame_deferredframe_forward_plusframe_vbframe_forward_plus";
+    assert_eq!(count_bytes(bytes, b"frame_forward_plus"), 2);
+    assert_eq!(count_bytes(bytes, b"frame_vb"), 1);
+    assert_eq!(count_bytes(b"frame_forward_plu", b"frame_forward_plus"), 0);
 }

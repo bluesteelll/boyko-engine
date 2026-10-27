@@ -23,7 +23,9 @@
 //! (`boyko_diag::profile`). Every GB site in this crate is gated
 //! `GpuCrashDiagLevel::COMPILED_IN && <armed byte>`; in a `shipping` build the first conjunct is a
 //! `const false`, so the site, its `#[cold]` body and the entry-point names it would load are not
-//! in the image. A runtime level above the ceiling is clamped, never refused.
+//! in the image. A runtime level above the ceiling is clamped, never refused. Two `const`
+//! assertions pin `COMPILED_IN` to the axis in every profile's build, and
+//! `boyko_app/tests/gpu_crash_shipping_census.rs` checks the linked images.
 //!
 //! # Where the pieces live
 //!
@@ -147,6 +149,46 @@ impl GpuCrashDiagLevel {
         Self::ALL.into_iter().find(|l| l.name().eq_ignore_ascii_case(v))
     }
 }
+
+/// The named profiles whose builds must compile every GB site out (`boyko_diag::profile`'s
+/// `player_profiles_compile_the_gpu_crash_diagnostics_out` names the same three).
+const GB_FREE_PROFILES: [&str; 3] = ["shipping", "shipping-min", "off"];
+
+/// `true` iff `name` is one of [`GB_FREE_PROFILES`]. `const` because `str::eq` is not.
+const fn is_gb_free_profile(name: &str) -> bool {
+    let n = name.as_bytes();
+    let mut i = 0;
+    while i < GB_FREE_PROFILES.len() {
+        let p = GB_FREE_PROFILES[i].as_bytes();
+        if p.len() == n.len() {
+            let mut j = 0;
+            while j < p.len() && p[j] == n[j] {
+                j += 1;
+            }
+            if j == p.len() {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+// The ceiling's deletion holds in the build that ships, not only in the one the tests run in
+// (GB review r1 F3). `the_ceiling_is_the_profile_axis_value` is a runtime test, evaluated only in
+// the profile the tests are built under (`dev`); these are compile-time, so CI's `profile-legs`
+// `cargo check` under each named profile, and the shipping census's nested `shipping` build,
+// evaluate them. A `COMPILED_IN` forced `true`, a ceiling read from anywhere but the axis, or a
+// `shipping` row that admits a level fails the shipping build here. G1 holds every site to
+// `COMPILED_IN && <armed byte>`; these hold `COMPILED_IN` itself.
+const _: () = assert!(
+    GpuCrashDiagLevel::COMPILED_IN == (boyko_diag::profile::GPU_CRASH_DIAG_CEILING != 0),
+    "invariant: GB is compiled in iff the profile axis's GPU_CRASH_DIAG_CEILING is above 0"
+);
+const _: () = assert!(
+    !GpuCrashDiagLevel::COMPILED_IN || !is_gb_free_profile(boyko_diag::profile::PROFILE_NAME),
+    "invariant: a shipping, shipping-min or off build compiles every GB site out"
+);
 
 /// `VK_EXT_debug_utils` command-buffer label and object-name entry points, loaded through
 /// `vkGetInstanceProcAddr` (the loader trampolines) when [`piece::LABELS`] is armed.
@@ -343,6 +385,19 @@ mod tests {
     fn the_ceiling_is_the_profile_axis_value() {
         assert_eq!(GpuCrashDiagLevel::CEILING as u8, boyko_diag::profile::GPU_CRASH_DIAG_CEILING);
         assert_eq!(GpuCrashDiagLevel::COMPILED_IN, GpuCrashDiagLevel::CEILING != GpuCrashDiagLevel::Off);
+    }
+
+    /// The `const` profile-name match behind the shipping-leg assertion: exact names only.
+    ///
+    /// RED: compare only the first `p.len()` bytes and `shipping-min` with a suffix matches.
+    #[test]
+    fn the_gb_free_profiles_match_by_exact_name() {
+        for name in ["shipping", "shipping-min", "off"] {
+            assert!(super::is_gb_free_profile(name), "{name}");
+        }
+        for name in ["dev", "editor", "custom", "", "ship", "shipping-minimal", "offline", "Shipping"] {
+            assert!(!super::is_gb_free_profile(name), "{name}");
+        }
     }
 
     #[test]
