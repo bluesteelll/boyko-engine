@@ -31,7 +31,7 @@
 //! proves the device alive (GB review r1 W1): an intermittent break panics one verified frame
 //! late. A systematic break (a marker that never lands, so no frame ever completes) never panics;
 //! it is RED here only through `frames_incomplete`, as it is in G4's path workers
-//! (`boot_validation_clean`) and in the G5 driver's witness (GB review r2 W1).
+//! (`boot_validation_clean`) (GB review r2 W1).
 //!
 //! # Running it
 //!

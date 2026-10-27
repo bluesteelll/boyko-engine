@@ -1014,8 +1014,8 @@ impl Renderer<'_> {
     /// frame proves the device alive — so a real loss still reaches the `boyko-E3013` report
     /// instead of a panic (GB review r1 W1). An intermittent break therefore panics one verified
     /// frame late. A systematic one (a marker that never lands, so no frame ever completes) never
-    /// fires this assert: its observer is the ledger's `frames_incomplete`, which G2, G4's path
-    /// workers and the G5 driver require to be `0` (GB review r2 W1).
+    /// fires this assert: its observer is the ledger's `frames_incomplete` (GB review r2 W1), which
+    /// G2 (`gpu_crumbs_frames`) and G4's path workers (`boot_validation_clean`) require to be `0`.
     #[cold]
     #[inline(never)]
     pub(crate) fn crumb_verify_slot(&self, fi: usize) {
