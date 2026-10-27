@@ -2177,6 +2177,33 @@ mod tests {
         assert!(v.complete && suspect.get().is_none(), "{v:?}");
     }
 
+    /// Verification can run out of serial order: a present that returns `OUT_OF_DATE` or
+    /// `SUBOPTIMAL` sends `drive_frame` into `recreate`, which waits idle without verifying and
+    /// resets `frame_index` to 0, so slot 0 (frame N+1) is verified before slot 1 (frame N). A complete frame OLDER
+    /// than the held suspect says nothing about the suspect's submission: the suspect stays and
+    /// no G2 break is named (GB triage r2 G-C). Per-slot monotonicity does not see this order.
+    ///
+    /// RED: drop the serial test from `verify_frame`'s clearing branch (`held != 0` alone) and
+    /// frame N clears suspect N+1 and names it.
+    #[test]
+    fn an_older_complete_frame_verified_after_the_suspect_keeps_it() {
+        let ledger = Cell::new(CrumbLedger::default());
+        let suspect = LossSuspect::new();
+        let (newer, _) = frame(ALL, 6, &[], 8);
+        assert!(!verify_frame(&newer, 0, Some(&region(8, 2, 4, false)), &ledger, &suspect).complete);
+        let (older, _) = frame(ALL, 6, &[], 7);
+        let v = verify_frame(&older, 1, Some(&region(7, 6, 6, true)), &ledger, &suspect);
+        assert_eq!(v, FrameVerdict { parity: true, complete: true, incomplete_while_alive: None });
+        assert_eq!(suspect.get().map(|s| (s.fi, s.serial)), Some((0, 8)), "an older frame keeps the suspect");
+        assert_eq!(ledger.get().serial_regressions, 0, "the per-slot check does not see a cross-slot order");
+
+        // The next frame, newer than the suspect, completes: that proves the device alive.
+        let (next, _) = frame(ALL, 6, &[], 9);
+        let v = verify_frame(&next, 0, Some(&region(9, 6, 6, true)), &ledger, &suspect);
+        assert_eq!(v.incomplete_while_alive, Some(8));
+        assert!(suspect.get().is_none());
+    }
+
     /// The loss surfaces at the submit of frame S+2, after the wait for S returned `VK_SUCCESS`
     /// with S's breadcrumbs incomplete: slot 0 now holds S+2 and slot 1 holds S+1, neither
     /// started. The report still names S's in-flight set through the suspect, first, and does
