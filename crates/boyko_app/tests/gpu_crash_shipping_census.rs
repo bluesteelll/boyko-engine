@@ -83,6 +83,14 @@ const GB_ONLY_NAMES: &[&str] = &[
 /// control caught it; the copy of a constant most likely became immediate stores).
 const GB_BODY_LITERALS: &[&str] = &["frame_forward_plus"];
 
+// Each list is the census's only witness of its half of the claim: the names prove the entry
+// points and extensions absent, the body literals prove the per-frame `#[cold]` bodies absent. An
+// empty list makes its loop vacuous and the census green while the shipping image grows (GB triage
+// r2 G-A: the body literals emptied beside an unfolded per-frame gate, shipping image 5838848 B
+// against 5824512 B, `1 passed`).
+const _: () = assert!(!GB_ONLY_NAMES.is_empty(), "the census needs at least one GB-only name");
+const _: () = assert!(!GB_BODY_LITERALS.is_empty(), "the census needs at least one GB body literal");
+
 /// Every per-knob override the profile axis honours only under `custom`: a stray one beside a
 /// named profile is a `compile_error!`, so the nested builds must not inherit any.
 const PROFILE_KNOBS: &[&str] = &[
