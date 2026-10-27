@@ -332,9 +332,15 @@ To run the benchmarks yourself:
   `jolt_parity_pyramid` comparison with Jolt Physics ([`crates/boyko_physics_parity`](crates/boyko_physics_parity)) and
   [`crates/bench_bevy_vs_boyko/benches`](crates/bench_bevy_vs_boyko/benches) (9, against
   `bevy_ecs`).
-- **Profiles:** `release` is the shipped build (fat LTO). `bench` turns LTO off and uses one codegen
-  unit, for reproducible A/B comparisons. A number taken with `cargo bench` therefore does not
-  describe the shipped build, so a result must name the profile it was taken under.
+- **Profiles:** a build is set on two independent axes, and a result must name both.
+  - **Codegen, by cargo's profile.** `release` is the shipped codegen (fat LTO). `bench` turns LTO
+    off and uses one codegen unit, for reproducible A/B comparisons, so a number taken with
+    `cargo bench` does not describe the shipped codegen.
+  - **What the engine compiles in, by `BOYKO_PROFILE`.** `--release` does not set it, and unset
+    means `dev`: a plain `cargo build --release` keeps every log level, every profiling zone and
+    the GPU crash-diagnostics labels and breadcrumbs (compiled in, armed Off until
+    `BOYKO_GPU_CRASH_DIAG` or the `GpuCrashDiag` resource arms them). The shipped game binary is
+    `cargo build --release` with `BOYKO_PROFILE=shipping`, which compiles the breadcrumbs out.
 - **Methodology:** [`docs/BENCHMARKING.md`](docs/BENCHMARKING.md).
 
 ## Testing
