@@ -998,3 +998,47 @@ jobs:
             exit 1
           fi
           echo "loom_region: 34 models executed and passed at LOOM_MAX_PREEMPTIONS=$LOOM_MAX_PREEMPTIONS"
+
+  # Render rung GB: the GPU crash diagnostics are zero-cost in a shipped build, shown on the linked
+  # images (`crates/boyko_app/tests/gpu_crash_shipping_census.rs`). The census builds the `clear`
+  # example twice in release, under `BOYKO_PROFILE=dev` and `=shipping`, each into its own target
+  # directory (`target/gb-census-dev`, `target/gb-census-shipping` here), and byte-scans both images:
+  # every GB entry-point name and per-frame body literal in `dev`, none in `shipping`. The owner's
+  # decision of 2026-10-27 (no breadcrumbs in the shipped build) is what it holds. It is ignored as
+  # `slow:`, so `test`'s ordinary run skips it, and until this job no CI leg ran it. The cargo line
+  # is exactly the one its ignore reason names, plus `--locked`.
+  #
+  # Its own job, not a step of `profile-census`: two nested fat-LTO release builds of the render
+  # stack, so a separate job runs in parallel instead of lengthening the symbol census's job, and it
+  # needs neither `llvm-tools` nor `rust-src` (a byte scan of the image, no symbol table).
+  # `windows-latest` by the rule above `jobs:` (it runs a test binary); the test is also
+  # `#![cfg(windows)]`, so elsewhere it would compile to no test at all.
+  #
+  # `--exact` turns a renamed test into a vacuous green (`running 0 tests`, cargo exit 0), so the
+  # two harness lines are pinned after the run, as the `loom` job pins its own.
+  #
+  # Wall time, INFORMATION only, never a gate: 113 s for this step on the dev host (2026-10-27, an
+  # 8-core Ryzen 7 9800X3D, CARGO_BUILD_JOBS=4, rustc 1.98.1 msvc, run by `tools/ci_mirror.py`), with
+  # the dependencies warm and every workspace crate rebuilt: building the test binary 26 s, then
+  # the test 87 s, of which each nested release build is 43 s. A cold runner adds the dependencies.
+  gpu-crash-census:
+    name: GPU crash diagnostics shipping census (GB)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: gb_sites_are_absent_from_shipping
+        run: |
+          cargo test --locked -p boyko-app --test gpu_crash_shipping_census -- --ignored --exact gb_sites_are_absent_from_shipping --test-threads=1 --nocapture 2>&1 | tee gpu_crash_census.log
+          if ! grep -qx "running 1 test" gpu_crash_census.log; then
+            echo "::error::gpu_crash_shipping_census ran no test: --exact gb_sites_are_absent_from_shipping matched nothing (renamed?)"
+            exit 1
+          fi
+          if ! grep -q "^test result: ok\. 1 passed; 0 failed; 0 ignored" gpu_crash_census.log; then
+            echo "::error::gpu_crash_shipping_census did not report '1 passed; 0 failed; 0 ignored'"
+            exit 1
+          fi
