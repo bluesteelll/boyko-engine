@@ -47,6 +47,11 @@ const GB_ONLY_NAMES: &[&str] = &[
     "vkCmdBeginDebugUtilsLabelEXT",
     "vkCmdEndDebugUtilsLabelEXT",
     "vkSetDebugUtilsObjectNameEXT",
+    "vkCmdWriteBufferMarkerAMD",
+    "vkCmdSetCheckpointNV",
+    "vkGetQueueCheckpointDataNV",
+    "VK_AMD_buffer_marker",
+    "VK_NV_device_diagnostic_checkpoints",
 ];
 
 /// Every per-knob override the profile axis honours only under `custom`: a stray one beside a

@@ -165,7 +165,7 @@ boyko_diag::profiling_partition!(Engine);
 pub use boyko_rhi_vulkan::window::pump_boot_messages;
 pub use device::GpuDevice;
 pub use fly::{FlyAction, FlyCameraPlugin, fly_default_map};
-pub use gpu_crash::{GpuCrashDiag, GpuCrashDiagLevel};
+pub use gpu_crash::{GpuCrashDiag, GpuCrashDiagLevel, GpuCrumbLedger};
 pub use occlusion_force::OcclusionForce;
 pub use plugins::EnginePlugins;
 pub use timer_resolution::TimerResolutionGuard;

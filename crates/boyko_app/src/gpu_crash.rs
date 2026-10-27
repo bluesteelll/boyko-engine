@@ -14,7 +14,7 @@
 //! (+ per-scope breadcrumbs) · `checkpoints` (+ NVIDIA per-stage checkpoints). Cumulative.
 
 use boyko_macros::Resource;
-pub use boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel;
+pub use boyko_rhi_vulkan::gpu_crash::{CrumbLedger, GpuCrashDiagLevel};
 
 /// The owner knob: which GPU crash-diagnostics level the next boot arms. Insert it before
 /// `App::run`; an explicit `insert_resource` after `EnginePlugins` wins over the
@@ -23,6 +23,78 @@ pub use boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel;
 pub struct GpuCrashDiag {
     /// The requested level (clamped to the build's ceiling at boot).
     pub level: GpuCrashDiagLevel,
+}
+
+/// What the GPU crash diagnostics armed and what the per-frame breadcrumb verification counted
+/// (render rung GB, gate G2). Inserted by the windowed runner at boot whenever any piece armed,
+/// and updated with the renderer's final ledger when the frame loop returns — so it is the
+/// arming witness a test or a pixel-proof driver reads: absent ⇒ nothing armed.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuCrumbLedger {
+    /// The level the boot armed (after the build's ceiling clamp).
+    pub level: GpuCrashDiagLevel,
+    /// The pieces the device probe left armed (`boyko_rhi_vulkan::gpu_crash::piece` bits,
+    /// `FAULT` included).
+    pub pieces: u8,
+    /// The per-frame pieces the renderer records (`pieces` minus `FAULT`, minus `MARKERS` when
+    /// the breadcrumb buffer could not be created).
+    pub frame_pieces: u8,
+    /// The verification counters.
+    pub counts: CrumbLedger,
+}
+
+/// The arming-witness file's variable: when set, the runner writes the final [`GpuCrumbLedger`]
+/// there as `key = value` lines when the frame loop returns — also on an unarmed run, where it
+/// reads `pieces = 0`, which is what lets a byte-identity driver tell an armed leg from one that
+/// silently was not.
+pub const GPU_CRASH_WITNESS_ENV: &str = "BOYKO_GPU_CRASH_WITNESS";
+
+/// Renders `l` as the witness file's text.
+pub fn witness_text(l: &GpuCrumbLedger) -> String {
+    use core::fmt::Write as _;
+    let c = l.counts;
+    let rows: [(&str, u64); 11] = [
+        ("pieces", u64::from(l.pieces)),
+        ("frame_pieces", u64::from(l.frame_pieces)),
+        ("frames_checked", c.frames_checked),
+        ("frames_incomplete", c.frames_incomplete),
+        ("parity_mismatch", c.parity_mismatch),
+        ("scopes_checked", c.scopes_checked),
+        ("labels_begun", c.labels_begun),
+        ("labels_ended", c.labels_ended),
+        ("overflow", c.overflow),
+        ("serial_regressions", c.serial_regressions),
+        ("last_serial", u64::from(c.last_serial)),
+    ];
+    let mut out = String::with_capacity(320);
+    // Cannot fail: writing to a `String` never errors.
+    let _ = writeln!(out, "level = {}", l.level.name());
+    for (key, value) in rows {
+        let _ = writeln!(out, "{key} = {value}");
+    }
+    out
+}
+
+/// The runner's end-of-loop GB step: refreshes the ledger resource from the renderer's counters
+/// and writes the witness file when [`GPU_CRASH_WITNESS_ENV`] asks. Cold: once per run.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+pub(crate) fn finish_run(app: &mut boyko_ecs::prelude::App, counts: CrumbLedger) {
+    let ledger = match app.world_mut().try_resource_mut::<GpuCrumbLedger>() {
+        Some(l) => {
+            l.counts = counts;
+            *l
+        }
+        None => GpuCrumbLedger::default(),
+    };
+    if let Some(path) = std::env::var_os(GPU_CRASH_WITNESS_ENV)
+        && let Err(e) = std::fs::write(&path, witness_text(&ledger))
+    {
+        let shown = path.to_string_lossy();
+        let err = crate::diag::debug_into(&e.kind());
+        crate::diag::report_dump_write_failed("GPU crash witness", &shown, err.as_str());
+    }
 }
 
 /// The dev seam's variable.
@@ -60,6 +132,21 @@ pub(crate) fn gpu_crash_diag_from_env() -> Option<GpuCrashDiag> {
 #[cfg(test)]
 mod tests {
     use super::{GpuCrashDiag, GpuCrashDiagLevel, parse_gpu_crash_diag};
+
+    #[test]
+    fn the_witness_names_every_field() {
+        let l = super::GpuCrumbLedger {
+            level: GpuCrashDiagLevel::Markers,
+            pieces: 7,
+            frame_pieces: 6,
+            counts: super::CrumbLedger { frames_checked: 10, last_serial: 12, ..Default::default() },
+        };
+        let t = super::witness_text(&l);
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines[..4], ["level = markers", "pieces = 7", "frame_pieces = 6", "frames_checked = 10"], "{t}");
+        assert_eq!(lines.last(), Some(&"last_serial = 12"), "{t}");
+        assert_eq!(lines.len(), 12);
+    }
 
     #[test]
     fn every_level_parses_and_a_typo_is_refused() {

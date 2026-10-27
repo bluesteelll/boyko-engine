@@ -693,6 +693,20 @@ fn run_worker(worker: Worker) {
         after.messengers_destroyed
     );
 
+    // Render rung GB (G4): the path workers' witness that the diagnostics were ARMED and verified
+    // frames under validation — a clean run with GB silently off would prove nothing about GB.
+    if worker != Worker::Canary {
+        let gb = app.world().try_resource::<boyko_app::GpuCrumbLedger>().copied();
+        eprintln!("BOOT-VALIDATION {name}: GPU crash diagnostics {gb:?}");
+        let gb = gb.unwrap_or_else(|| {
+            panic!("GPU CRASH DIAGNOSTICS NOT ARMED ({name}): no GpuCrumbLedger after a boot asked for Checkpoints")
+        });
+        assert!(
+            gb.frame_pieces != 0 && gb.counts.frames_checked > 0,
+            "GPU CRASH DIAGNOSTICS DID NOT RECORD ({name}): {gb:?}"
+        );
+    }
+
     if worker == Worker::Canary {
         let before = app
             .world()

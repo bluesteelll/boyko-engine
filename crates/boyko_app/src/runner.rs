@@ -487,6 +487,15 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // The R4 host probe (WindowInfo-adjacent, same post-present publish step):
     // lets headless smokes assert the light-upload gating + CSM arming decisions.
     app.world_mut().insert_resource(HostFrameStats::default());
+    // Render rung GB: the arming witness — present iff some GPU crash-diagnostics piece armed.
+    if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN && ctx.gpu_crash().pieces != 0 {
+        app.world_mut().insert_resource(crate::gpu_crash::GpuCrumbLedger {
+            level: ctx.gpu_crash().level,
+            pieces: ctx.gpu_crash().pieces,
+            frame_pieces: host.renderer.gpu_crumb_pieces(),
+            counts: boyko_rhi_vulkan::gpu_crash::CrumbLedger::default(),
+        });
+    }
 
     // ── SDFDDGI I2 (plan §3): OVERRIDE the `DdgiPlugin`'s default `DdgiCaps`
     // (storage_ok = true) with the REAL device query now that the device is
@@ -1034,6 +1043,11 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // error) return into this ONE teardown + destroy sequence below.
     if !app.world().resource::<AppExit>().0 {
         frame_loop(app, &mut host, ctx);
+    }
+    // Render rung GB: the final breadcrumb ledger (and the `BOYKO_GPU_CRASH_WITNESS` file when
+    // asked), read while the renderer still exists. Folded away in a `shipping` build.
+    if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN {
+        crate::gpu_crash::finish_run(app, host.renderer.gpu_crumb_ledger());
     }
 
     teardown(app, host, ctx);
