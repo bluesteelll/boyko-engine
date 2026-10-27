@@ -203,8 +203,9 @@ pub const ANALYSIS_ADMITTED: bool = generated::ANALYSIS_ADMITTED;
 /// census (`boyko_app/tests/gpu_crash_shipping_census.rs`) checks by scanning the linked binary.
 /// A runtime level above the ceiling is clamped to it, never refused.
 ///
-/// `Fault` costs no per-frame work but would ship crash telemetry to players, so the shipping
-/// rows hold `0` until the owner decides otherwise.
+/// The shipping rows hold `0` by the owner's decision of 2026-10-27: the shipped build carries no
+/// breadcrumbs, only a special (`dev` / `editor`) build does. That includes `Fault`, which costs no
+/// per-frame work but would ship crash telemetry to players.
 pub const GPU_CRASH_DIAG_CEILING: u8 = generated::GPU_CRASH_DIAG_CEILING;
 
 // NO assertion that this value is in range, and NO pin on the number itself. The two are refused
