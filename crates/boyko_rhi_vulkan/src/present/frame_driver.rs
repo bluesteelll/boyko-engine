@@ -578,8 +578,10 @@ impl<'ctx> Renderer<'ctx> {
         if !result.is_success() {
             return Err(SwapchainError::VkError("vkWaitForFences", result));
         }
-        // Render rung GB (G2): this slot's previous frame is complete now — verify its
-        // breadcrumbs before the record below overwrites the slot's shadow.
+        // Render rung GB (G2): verify this slot's previous frame before the record below
+        // overwrites the slot's shadow. A `VK_SUCCESS` wait does not prove the frame finished —
+        // the spec allows it on a lost device — so an incomplete frame is kept as the loss
+        // suspect for the device-loss report rather than asserted (`gpu_crumbs::verify_frame`).
         if self.crumbs_armed() {
             self.crumb_verify_slot(self.frame_index);
         }

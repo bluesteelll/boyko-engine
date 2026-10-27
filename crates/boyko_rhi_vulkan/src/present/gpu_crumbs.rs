@@ -536,9 +536,10 @@ impl CrumbBuffer {
     ///
     /// # Safety
     ///
-    /// The mapping is live (the buffer was not destroyed). The caller either waited the fence of
-    /// the submission that last wrote the slot (whose frame close made the writes host-visible)
-    /// or the device is lost, where the mapping stays valid with undefined contents.
+    /// The mapping is live (the buffer was not destroyed), and the caller either waited the fence
+    /// of the submission that last wrote the slot or saw the device lost. On a live device the
+    /// waited frame's close made the writes host-visible; on a lost device (where the wait may
+    /// still return `VK_SUCCESS`) the mapping stays valid with undefined contents.
     unsafe fn read_region(&self, fi: usize, out: &mut [u32; REGION_WORDS]) {
         debug_assert!(fi < FRAMES_IN_FLIGHT);
         let base = self.mapped.as_ptr().wrapping_add(fi * REGION_BYTES).cast::<u32>();
@@ -581,7 +582,8 @@ pub(crate) fn crumb_memory_type(props: &VkPhysicalDeviceMemoryProperties, type_b
 }
 
 /// The renderer's GB state: the armed pieces, their entry points, the marker buffer, the serial
-/// counter, the ledger and the two slot shadows. `Some` on the [`Renderer`] only in an armed run.
+/// counter, the ledger, the two slot shadows and the loss suspect. `Some` on the [`Renderer`] only
+/// in an armed run.
 pub(crate) struct CrumbState {
     /// The armed per-frame pieces ([`piece::PER_FRAME`] bits).
     pub(crate) bits: u8,
@@ -593,6 +595,102 @@ pub(crate) struct CrumbState {
     last_serial: Cell<u32>,
     pub(crate) ledger: Cell<CrumbLedger>,
     pub(crate) slots: [CrumbSlot; FRAMES_IN_FLIGHT],
+    /// The frame kept for the device-loss report when its breadcrumbs were incomplete after a
+    /// successful fence wait ([`verify_frame`]).
+    suspect: LossSuspect,
+}
+
+/// The loss suspect: the first frame, since the device last proved alive, whose breadcrumbs were
+/// incomplete after its fence wait returned `VK_SUCCESS`.
+///
+/// The spec lets `vkWaitForFences` return `VK_SUCCESS` on a lost device ("Lost Device"), so such a
+/// frame is a suspected loss, not yet a G2 break. Its slot's shadow is reused two frames later, so
+/// the frame is copied out here, and the device-loss report still names its in-flight set when the
+/// loss only surfaces at a later submit (GB review r1 W1). A later frame that completes proves the
+/// device alive: it clears the suspect, and the incomplete frame becomes a G2 break.
+pub(crate) struct LossSuspect {
+    /// The suspect's serial, `0` when none is held (a serial never takes `0`): the one word every
+    /// verified frame reads.
+    serial: Cell<u32>,
+    /// The suspect as it stood when it was verified: its shadow and its region as read then.
+    /// Copied only on the cold paths (a new suspect, the report).
+    frame: Cell<Option<SlotSnapshot>>,
+}
+
+impl LossSuspect {
+    /// No suspect held.
+    pub(crate) fn new() -> Self {
+        Self { serial: Cell::new(0), frame: Cell::new(None) }
+    }
+
+    /// The suspect held, if any.
+    fn get(&self) -> Option<SlotSnapshot> {
+        if self.serial.get() == 0 { None } else { self.frame.get() }
+    }
+}
+
+/// What [`verify_frame`] found for one frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct FrameVerdict {
+    /// Graph-pass scopes entered == passes the graph declared. Host-side bookkeeping, so a lost
+    /// device cannot falsify it.
+    pub(crate) parity: bool,
+    /// Every breadcrumb of the frame carries its serial (always `true` without the markers piece).
+    pub(crate) complete: bool,
+    /// `Some(s)`: this frame completed while the suspect of serial `s` was held. The device ran
+    /// past `s`, so `s` was incomplete on a LIVE device: a G2 break, not a loss.
+    pub(crate) incomplete_while_alive: Option<u32>,
+}
+
+/// Verifies the frame last recorded into `slot` (slot index `fi`) after its fence wait returned
+/// `VK_SUCCESS`, and folds it into `ledger`. `region` is the slot's words as read back (`None`: the
+/// markers piece is not armed). The device-free half of [`Renderer::crumb_verify_slot`]:
+/// - the ledger counts the frame, its scopes, its labels and its parity;
+/// - an incomplete frame is counted in `frames_incomplete` and becomes the loss suspect when none
+///   is held (the first one is nearest the loss, so a later one never replaces it);
+/// - a complete frame newer than a held suspect clears the suspect and names it in the verdict.
+pub(crate) fn verify_frame(
+    slot: &CrumbSlot,
+    fi: usize,
+    region: Option<&[u32; REGION_WORDS]>,
+    ledger: &Cell<CrumbLedger>,
+    suspect: &LossSuspect,
+) -> FrameVerdict {
+    let serial = slot.serial.get();
+    let mut l = ledger.get();
+    l.frames_checked += 1;
+    l.scopes_checked += u64::from(slot.cursor.get());
+    l.overflow += u64::from(slot.overflow.get());
+    l.labels_begun += u64::from(slot.labels_begun.get());
+    l.labels_ended += u64::from(slot.labels_ended.get());
+    let parity = slot.passes_entered.get() == slot.pass_count.get();
+    if !parity {
+        l.parity_mismatch += 1;
+    }
+    let complete = region.is_none_or(|r| frame_complete(r, serial, slot.recorded()));
+    let held = suspect.serial.get();
+    let mut incomplete_while_alive = None;
+    if !complete {
+        l.frames_incomplete += 1;
+        if held == 0 {
+            suspect.frame.set(Some(SlotSnapshot::of(slot, fi, region.copied())));
+            suspect.serial.set(serial);
+        }
+    } else if held != 0 && (serial.wrapping_sub(held) as i32) > 0 {
+        suspect.serial.set(0);
+        suspect.frame.set(None);
+        incomplete_while_alive = Some(held);
+    }
+    let last = slot.last_verified.get();
+    if last != 0 && (serial.wrapping_sub(last) as i32) <= 0 {
+        l.serial_regressions += 1;
+    }
+    slot.last_verified.set(serial);
+    if l.last_serial == 0 || (serial.wrapping_sub(l.last_serial) as i32) > 0 {
+        l.last_serial = serial;
+    }
+    ledger.set(l);
+    FrameVerdict { parity, complete, incomplete_while_alive }
 }
 
 impl CrumbState {
@@ -640,6 +738,7 @@ impl CrumbState {
             last_serial: Cell::new(0),
             ledger: Cell::new(CrumbLedger::default()),
             slots: [CrumbSlot::new(), CrumbSlot::new()],
+            suspect: LossSuspect::new(),
         });
         if let Some(b) = state.buffer.as_ref() {
             state.set_name(VK_OBJECT_TYPE_BUFFER, b.buffer.0, "gpu_crumbs");
@@ -901,10 +1000,16 @@ impl Renderer<'_> {
         close_frame(slot, st.bits, &mut sink);
     }
 
-    /// Verifies the frame last recorded into slot `fi`, whose fence the caller just waited, and
-    /// folds it into the ledger: scope parity (scopes entered == passes declared), and with
-    /// markers, completion (every scope's begin and end and the frame end carry its serial).
-    /// A debug build asserts both, so every armed debug frame is also a G2 check.
+    /// Verifies the frame last recorded into slot `fi`, whose fence wait the caller just saw
+    /// return `VK_SUCCESS`, and folds it into the ledger ([`verify_frame`]): scope parity (scopes
+    /// entered == passes declared), and with markers, completion (every scope's begin and end and
+    /// the frame end carry its serial).
+    ///
+    /// A debug build asserts parity on every frame. Completion is asserted one frame late: the
+    /// spec lets the wait return `VK_SUCCESS` on a lost device, so an incomplete frame is first
+    /// kept as the loss suspect, and it is a G2 break only once a later frame completes and so
+    /// proves the device alive. Every armed debug frame stays a G2 check, and a real loss still
+    /// reaches the `boyko-E3013` report instead of a panic (GB review r1 W1).
     #[cold]
     #[inline(never)]
     pub(crate) fn crumb_verify_slot(&self, fi: usize) {
@@ -916,51 +1021,34 @@ impl Renderer<'_> {
             return;
         }
         slot.pending.set(false);
-        let serial = slot.serial.get();
-        let mut l = st.ledger.get();
-        l.frames_checked += 1;
-        l.scopes_checked += u64::from(slot.cursor.get());
-        l.overflow += u64::from(slot.overflow.get());
-        l.labels_begun += u64::from(slot.labels_begun.get());
-        l.labels_ended += u64::from(slot.labels_ended.get());
-        let parity = slot.passes_entered.get() == slot.pass_count.get();
-        if !parity {
-            l.parity_mismatch += 1;
-        }
-        let complete = match st.buffer.as_ref() {
-            Some(b) => {
-                let mut region = [0u32; REGION_WORDS];
-                // SAFETY: the buffer is live (destroyed only in the renderer's `Drop`), and the
-                // caller waited the fence of the submission that recorded this slot's frame,
-                // whose frame close made its marker writes host-visible.
-                unsafe { b.read_region(fi, &mut region) };
-                frame_complete(&region, serial, slot.recorded())
-            }
-            None => true,
-        };
-        if !complete {
-            l.frames_incomplete += 1;
-        }
-        let last = slot.last_verified.get();
-        if last != 0 && (serial.wrapping_sub(last) as i32) <= 0 {
-            l.serial_regressions += 1;
-        }
-        slot.last_verified.set(serial);
-        if l.last_serial == 0 || (serial.wrapping_sub(l.last_serial) as i32) > 0 {
-            l.last_serial = serial;
-        }
-        st.ledger.set(l);
+        let region = st.buffer.as_ref().map(|b| {
+            let mut words = [0u32; REGION_WORDS];
+            // SAFETY: the buffer is live (destroyed only in the renderer's `Drop`), and the caller
+            // waited the fence of the submission that recorded this slot's frame. On a live device
+            // that frame's close made its marker writes host-visible. On a lost device the wait may
+            // still return `VK_SUCCESS` (spec, "Lost Device"); the mapping then stays valid with
+            // undefined contents, which is why `verify_frame` keeps an incomplete frame as a suspect
+            // rather than trusting it. Either way the reads are volatile, in bounds, and form no
+            // reference over the mapping.
+            unsafe { b.read_region(fi, &mut words) };
+            words
+        });
+        let v = verify_frame(slot, fi, region.as_ref(), &st.ledger, &st.suspect);
         debug_assert!(
-            parity,
-            "invariant (GB G2): {} graph-pass scopes entered for {} declared passes on serial {serial} \
+            v.parity,
+            "invariant (GB G2): {} graph-pass scopes entered for {} declared passes on serial {} \
              ({} declarator) -- a declared pass never crossed a funnel, or one crossed twice",
             slot.passes_entered.get(),
             slot.pass_count.get(),
+            slot.serial.get(),
             DECLARATOR_NAMES.get(slot.declarator.get() as usize).copied().unwrap_or("?"),
         );
         debug_assert!(
-            complete,
-            "invariant (GB G2): serial {serial}'s breadcrumbs are incomplete after its fence wait"
+            v.incomplete_while_alive.is_none(),
+            "invariant (GB G2): serial {}'s breadcrumbs were incomplete after its fence wait, and \
+             serial {} then completed, so the device was alive -- a scope's marker never landed",
+            v.incomplete_while_alive.unwrap_or(0),
+            slot.serial.get(),
         );
     }
 
@@ -997,6 +1085,9 @@ const FAULT_VENDOR_LINES: usize = 3;
 const IN_FLIGHT_NAMED: usize = 4;
 /// One report line's bound, in bytes.
 pub(crate) const REPORT_LINE_BYTES: usize = 256;
+/// The loss suspect's slot-line tag: the line keeps the `slot … passes N` head every slot line
+/// has (G3 parses it), and says why this frame is listed although its slot moved on.
+const SUSPECT_TAG: &str = " (suspect: incomplete after its fence wait)";
 
 /// One slot's frame, copied out of the shadow and the marker region at report time.
 #[derive(Clone, Copy)]
@@ -1014,6 +1105,21 @@ struct SlotSnapshot {
 }
 
 impl SlotSnapshot {
+    /// Copies `slot`'s shadow (slot index `fi`) beside `region`, its words as read back.
+    fn of(slot: &CrumbSlot, fi: usize, region: Option<[u32; REGION_WORDS]>) -> Self {
+        Self {
+            fi,
+            serial: slot.serial.get(),
+            declarator: slot.declarator.get(),
+            pass_count: slot.pass_count.get(),
+            cursor: slot.cursor.get(),
+            overflow: slot.overflow.get(),
+            region,
+            scope_ids: core::array::from_fn(|i| slot.scope_ids[i].get()),
+            names: core::array::from_fn(|i| slot.names[i].get()),
+        }
+    }
+
     fn recorded(&self) -> usize {
         (self.cursor as usize).min(CRUMB_SCOPE_CAP)
     }
@@ -1097,6 +1203,9 @@ pub struct DeviceLostReport {
     pieces: u8,
     frame_pieces: u8,
     slots: [Option<SlotSnapshot>; FRAMES_IN_FLIGHT],
+    /// The loss suspect held at the loss ([`LossSuspect`]): a frame already seen incomplete after
+    /// a successful fence wait, whose slot may since have been reused.
+    suspect: Option<SlotSnapshot>,
     checkpoints: CheckpointRead,
     fault: FaultRead,
     vendor_binary: Vec<u8>,
@@ -1198,16 +1307,25 @@ impl DeviceLostReport {
         let mut any_in_flight = false;
         let mut any_armed = false;
         if markers {
+            // The suspect first: the host already saw that frame incomplete after a successful
+            // fence wait, so the loss most likely began there (GB review r1 W1). A slot that
+            // still holds the suspect's serial prints instead: its words were read later.
+            let suspect =
+                self.suspect.as_ref().filter(|x| self.slots.iter().flatten().all(|s| s.serial != x.serial));
+            if let Some(snap) = suspect {
+                any_armed = true;
+                any_in_flight |= self.write_slot(snap, SUSPECT_TAG, &mut line, &mut emit);
+            }
             for snap in order.iter().flatten() {
                 any_armed = true;
-                any_in_flight |= self.write_slot(snap, &mut line, &mut emit);
+                any_in_flight |= self.write_slot(snap, "", &mut line, &mut emit);
             }
             for (fi, s) in self.slots.iter().enumerate() {
                 if s.is_none() {
                     out!("slot {fi}: no armed frame recorded");
                 }
             }
-            if any_armed && !any_in_flight {
+            if any_armed && !any_in_flight && suspect.is_none() {
                 out!(
                     "no GB scope was in flight in either slot: the loss is likely outside the frame command \
                      buffer (an upload or readback submission on the same queue)"
@@ -1331,10 +1449,12 @@ impl DeviceLostReport {
         );
     }
 
-    /// One slot's breadcrumb line. Returns whether any scope of it was in flight.
+    /// One slot's breadcrumb line, `tag` after its header (empty for a live slot). Returns whether
+    /// any scope of it was in flight.
     fn write_slot(
         &self,
         s: &SlotSnapshot,
+        tag: &str,
         line: &mut boyko_log::DspBuf<REPORT_LINE_BYTES>,
         emit: &mut impl FnMut(&str),
     ) -> bool {
@@ -1343,7 +1463,7 @@ impl DeviceLostReport {
         let decl = DECLARATOR_NAMES.get(s.declarator as usize).copied().unwrap_or("?");
         let _ = write!(
             line,
-            "slot {} serial {} declarator {decl} passes {}: ",
+            "slot {} serial {} declarator {decl} passes {}{tag}: ",
             s.fi, s.serial, s.pass_count
         );
         let Some(region) = s.region.as_ref() else {
@@ -1430,19 +1550,10 @@ impl Renderer<'_> {
                     unsafe { b.read_region(fi, &mut words) };
                     words
                 });
-                *out = Some(SlotSnapshot {
-                    fi,
-                    serial: slot.serial.get(),
-                    declarator: slot.declarator.get(),
-                    pass_count: slot.pass_count.get(),
-                    cursor: slot.cursor.get(),
-                    overflow: slot.overflow.get(),
-                    region,
-                    scope_ids: core::array::from_fn(|i| slot.scope_ids[i].get()),
-                    names: core::array::from_fn(|i| slot.names[i].get()),
-                });
+                *out = Some(SlotSnapshot::of(slot, fi, region));
             }
         }
+        let suspect = st.and_then(|s| s.suspect.get());
 
         let wants = crash.level.requested_pieces();
         let checkpoints = match st.and_then(|s| s.checkpoints) {
@@ -1563,6 +1674,7 @@ impl Renderer<'_> {
             pieces: crash.pieces,
             frame_pieces: self.crumb_bits,
             slots,
+            suspect,
             checkpoints,
             fault,
             vendor_binary,
@@ -1926,6 +2038,7 @@ mod tests {
             pieces: piece::FAULT | piece::PER_FRAME,
             frame_pieces: piece::PER_FRAME,
             slots: [Some(snapshot(0, old, region(old, 7, 7, true))), Some(snapshot(1, new, lost))],
+            suspect: None,
             checkpoints: CheckpointRead::Read { total: 2, count: 2, entries },
             fault: FaultRead::Read(fault),
             vendor_binary: vendor_fixture(),
@@ -1965,6 +2078,7 @@ mod tests {
             pieces: piece::LABELS,
             frame_pieces: piece::LABELS,
             slots: [None, None],
+            suspect: None,
             checkpoints: CheckpointRead::NotRequested,
             fault: FaultRead::NotRequested,
             vendor_binary: Vec::new(),
@@ -1985,6 +2099,7 @@ mod tests {
             pieces: piece::LABELS | piece::MARKERS,
             frame_pieces: piece::LABELS | piece::MARKERS,
             slots: [Some(snapshot(0, 4, region(4, 7, 7, true))), Some(snapshot(1, 5, region(5, 7, 7, true)))],
+            suspect: None,
             checkpoints: CheckpointRead::NotRequested,
             fault: FaultRead::Unavailable,
             vendor_binary: Vec::new(),
@@ -1993,5 +2108,117 @@ mod tests {
         let text = lines_of(&report, "").join("\n");
         assert!(text.contains("no GB scope was in flight in either slot"), "{text}");
         assert!(text.contains("device fault: VK_EXT_device_fault is unavailable"), "{text}");
+    }
+
+    /// A frame whose fence wait returned `VK_SUCCESS` with its breadcrumbs incomplete — the spec
+    /// allows that on a lost device — is counted and kept as the loss suspect, not asserted, and
+    /// the copy survives the slot's reuse. A second incomplete frame keeps the FIRST suspect, the
+    /// one nearest the loss (GB review r1 W1).
+    ///
+    /// RED: drop the suspect store in `verify_frame` and `suspect.get()` is `None`.
+    #[test]
+    fn an_incomplete_frame_after_a_successful_wait_is_kept_as_the_loss_suspect() {
+        let ledger = Cell::new(CrumbLedger::default());
+        let suspect = LossSuspect::new();
+        let (a, _) = frame(ALL, 6, &[HostScope::PresentBlit], 7);
+        let hung = region(7, 2, 4, false);
+        let v = verify_frame(&a, 0, Some(&hung), &ledger, &suspect);
+        assert_eq!(v, FrameVerdict { parity: true, complete: false, incomplete_while_alive: None });
+        assert_eq!(ledger.get().frames_incomplete, 1);
+        let kept = suspect.get().expect("the incomplete frame is kept as the suspect");
+        assert_eq!((kept.fi, kept.serial, kept.cursor, kept.pass_count), (0, 7, 7, 6));
+        assert!(kept.region == Some(hung), "the suspect keeps the words read at its verification");
+
+        // The slot's shadow is reused two frames later; the suspect is a copy.
+        a.begin(9, 0, 6);
+        assert_eq!(suspect.get().map(|s| s.serial), Some(7));
+
+        // The device stays lost: the next frame is incomplete too, and the first suspect stays.
+        let (b, _) = frame(ALL, 6, &[HostScope::PresentBlit], 8);
+        let v = verify_frame(&b, 1, Some(&region(6, 7, 7, true)), &ledger, &suspect);
+        assert!(!v.complete && v.incomplete_while_alive.is_none(), "{v:?}");
+        assert_eq!(suspect.get().map(|s| (s.fi, s.serial)), Some((0, 7)));
+        assert_eq!(ledger.get().frames_incomplete, 2);
+        assert_eq!(ledger.get().frames_checked, 2);
+    }
+
+    /// A frame that completes after the suspect proves the device alive: the suspect is cleared
+    /// and named in the verdict — the G2 break `crumb_verify_slot` asserts in a debug build. A
+    /// complete frame with no suspect held names nothing.
+    ///
+    /// RED: drop the clearing branch in `verify_frame` and the verdict carries `None`.
+    #[test]
+    fn a_later_complete_frame_proves_the_device_alive_and_clears_the_suspect() {
+        let ledger = Cell::new(CrumbLedger::default());
+        let suspect = LossSuspect::new();
+        let (a, _) = frame(ALL, 6, &[], 7);
+        assert!(!verify_frame(&a, 0, Some(&region(7, 2, 4, false)), &ledger, &suspect).complete);
+        let (b, _) = frame(ALL, 6, &[], 8);
+        let v = verify_frame(&b, 1, Some(&region(8, 6, 6, true)), &ledger, &suspect);
+        assert_eq!(v, FrameVerdict { parity: true, complete: true, incomplete_while_alive: Some(7) });
+        assert!(suspect.get().is_none(), "a live device clears the suspect");
+        assert_eq!(ledger.get().frames_incomplete, 1, "the incomplete frame stays counted for G2");
+
+        let (c, _) = frame(ALL, 6, &[], 9);
+        let v = verify_frame(&c, 0, Some(&region(9, 6, 6, true)), &ledger, &suspect);
+        assert_eq!(v.incomplete_while_alive, None);
+
+        // Without markers nothing is ever incomplete, so nothing is ever suspected.
+        let (d, _) = frame(piece::LABELS, 6, &[], 10);
+        let v = verify_frame(&d, 1, None, &ledger, &suspect);
+        assert!(v.complete && suspect.get().is_none(), "{v:?}");
+    }
+
+    /// The loss surfaces at the submit of frame S+2, after the wait for S returned `VK_SUCCESS`
+    /// with S's breadcrumbs incomplete: slot 0 now holds S+2 and slot 1 holds S+1, neither
+    /// started. The report still names S's in-flight set through the suspect, first, and does
+    /// not send the reader outside the frame. Without the suspect the same slots print the
+    /// "outside the frame" hint — the W1 failure. A slot that still holds the suspect's serial
+    /// prints in its place, once.
+    ///
+    /// RED: skip the suspect in `write_lines` and the hint prints with no line naming serial 7.
+    #[test]
+    fn a_loss_after_a_successful_wait_still_names_the_suspect() {
+        let (s, s1, s2) = (7u32, 8u32, 9u32);
+        let hung = region(s, 3, 5, false);
+        let report = |slots: [Option<SlotSnapshot>; FRAMES_IN_FLIGHT], suspect: Option<SlotSnapshot>| DeviceLostReport {
+            level: GpuCrashDiagLevel::Markers,
+            pieces: piece::FAULT | piece::LABELS | piece::MARKERS,
+            frame_pieces: piece::LABELS | piece::MARKERS,
+            slots,
+            suspect,
+            checkpoints: CheckpointRead::NotRequested,
+            fault: FaultRead::Unavailable,
+            vendor_binary: Vec::new(),
+            vendor_status: VendorBinaryStatus::Unsupported,
+        };
+        // Slot 0's words still hold S's breadcrumbs; slot 1's hold S-1's (S+1 never began).
+        let reused = [Some(snapshot(0, s2, hung)), Some(snapshot(1, s1, region(s - 1, 7, 7, true)))];
+
+        let lines = lines_of(&report(reused, Some(snapshot(0, s, hung))), "");
+        let text = lines.join("
+");
+        assert!(lines.len() <= 16 && lines.iter().all(|l| l.len() <= REPORT_LINE_BYTES), "{text}");
+        assert!(
+            lines[1].starts_with("slot 0 serial 7 declarator deferred passes 6 (suspect: incomplete after its fence wait): "),
+            "the suspect prints first:
+{text}"
+        );
+        assert!(lines[1].contains("in flight: #3 ssao_atrous#1, #4 ssao_atrous#2"), "{text}");
+        assert!(lines[2].starts_with("slot 0 serial 9 declarator deferred passes 6: frame not started"), "{text}");
+        assert!(lines[3].starts_with("slot 1 serial 8 declarator deferred passes 6: frame not started"), "{text}");
+        assert!(!text.contains("no GB scope was in flight"), "{text}");
+
+        let without = lines_of(&report(reused, None), "").join("
+");
+        assert!(without.contains("no GB scope was in flight in either slot"), "{without}");
+        assert!(!without.contains("serial 7"), "{without}");
+
+        // The loss surfaced before slot 0 was reused: the live slot prints S, the suspect does not.
+        let held = [Some(snapshot(0, s, hung)), Some(snapshot(1, s1, region(s - 1, 7, 7, true)))];
+        let text = lines_of(&report(held, Some(snapshot(0, s, hung))), "").join("
+");
+        assert_eq!(text.matches("serial 7 ").count(), 1, "{text}");
+        assert!(!text.contains(SUSPECT_TAG), "{text}");
     }
 }

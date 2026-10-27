@@ -24,8 +24,12 @@
 //! - `parity_mismatch == 0` — graph-pass scopes entered == passes declared, every frame;
 //! - `serial_regressions == 0`, `labels_begun == labels_ended`.
 //!
-//! A debug build also asserts parity and completion inside the verification itself
-//! (`crumb_verify_slot`), so a mismatch panics the worker on the first bad frame.
+//! A debug build also asserts inside the verification itself (`crumb_verify_slot`): parity on the
+//! first bad frame, completion one frame late. The spec lets a fence wait return `VK_SUCCESS` on a
+//! lost device, so an incomplete frame is first kept as the loss suspect for the device-loss
+//! report, and panics the worker only when a later frame completes and so proves the device alive
+//! (GB review r1 W1). An incomplete frame with no later frame is still RED here, through
+//! `frames_incomplete`.
 //!
 //! # Running it
 //!
