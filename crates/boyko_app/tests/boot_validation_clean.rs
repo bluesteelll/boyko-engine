@@ -705,6 +705,19 @@ fn run_worker(worker: Worker) {
             gb.frame_pieces != 0 && gb.counts.frames_checked > 0,
             "GPU CRASH DIAGNOSTICS DID NOT RECORD ({name}): {gb:?}"
         );
+        // The ledger is this gate's observer of a SYSTEMATIC breadcrumb break (GB review r2 W1):
+        // a marker that never lands leaves every frame incomplete, no later frame completes, and
+        // the debug completion assert inside the verification — which waits for a frame that
+        // proves the device alive (GB review r1 W1) — never fires. A device loss before the last
+        // budgeted frame ends the frame loop early and has already red the budget assert above.
+        assert!(
+            gb.counts.frames_incomplete == 0,
+            "GB BREADCRUMBS INCOMPLETE ({name}): {} of {} verified frames lacked a breadcrumb after \
+             their fence wait -- a scope's marker never landed (a device loss prints boyko-E3003 \
+             first): {gb:?}",
+            gb.counts.frames_incomplete,
+            gb.counts.frames_checked
+        );
     }
 
     if worker == Worker::Canary {

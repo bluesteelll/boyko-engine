@@ -607,7 +607,10 @@ pub(crate) struct CrumbState {
 /// frame is a suspected loss, not yet a G2 break. Its slot's shadow is reused two frames later, so
 /// the frame is copied out here, and the device-loss report still names its in-flight set when the
 /// loss only surfaces at a later submit (GB review r1 W1). A later frame that completes proves the
-/// device alive: it clears the suspect, and the incomplete frame becomes a G2 break.
+/// device alive: it clears the suspect, and the incomplete frame becomes a G2 break. When no later
+/// frame completes — a loss, or a systematic break on a live device — the first suspect stays for
+/// the rest of the run; only the ledger's `frames_incomplete` tells the second case apart, on a run
+/// whose frame loop ended without a loss (GB review r2 W1).
 pub(crate) struct LossSuspect {
     /// The suspect's serial, `0` when none is held (a serial never takes `0`): the one word every
     /// verified frame reads.
@@ -1005,11 +1008,14 @@ impl Renderer<'_> {
     /// entered == passes declared), and with markers, completion (every scope's begin and end and
     /// the frame end carry its serial).
     ///
-    /// A debug build asserts parity on every frame. Completion is asserted one frame late: the
-    /// spec lets the wait return `VK_SUCCESS` on a lost device, so an incomplete frame is first
-    /// kept as the loss suspect, and it is a G2 break only once a later frame completes and so
-    /// proves the device alive. Every armed debug frame stays a G2 check, and a real loss still
-    /// reaches the `boyko-E3013` report instead of a panic (GB review r1 W1).
+    /// A debug build asserts parity on every frame. Completion is asserted only once a later
+    /// frame completes: the spec lets the wait return `VK_SUCCESS` on a lost device, so an
+    /// incomplete frame is first kept as the loss suspect, and it is a G2 break only when a later
+    /// frame proves the device alive — so a real loss still reaches the `boyko-E3013` report
+    /// instead of a panic (GB review r1 W1). An intermittent break therefore panics one verified
+    /// frame late. A systematic one (a marker that never lands, so no frame ever completes) never
+    /// fires this assert: its observer is the ledger's `frames_incomplete`, which G2, G4's path
+    /// workers and the G5 driver require to be `0` (GB review r2 W1).
     #[cold]
     #[inline(never)]
     pub(crate) fn crumb_verify_slot(&self, fi: usize) {

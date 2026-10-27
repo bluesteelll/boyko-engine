@@ -25,11 +25,13 @@
 //! - `serial_regressions == 0`, `labels_begun == labels_ended`.
 //!
 //! A debug build also asserts inside the verification itself (`crumb_verify_slot`): parity on the
-//! first bad frame, completion one frame late. The spec lets a fence wait return `VK_SUCCESS` on a
-//! lost device, so an incomplete frame is first kept as the loss suspect for the device-loss
-//! report, and panics the worker only when a later frame completes and so proves the device alive
-//! (GB review r1 W1). An incomplete frame with no later frame is still RED here, through
-//! `frames_incomplete`.
+//! first bad frame, completion only once a later frame completes. The spec lets a fence wait
+//! return `VK_SUCCESS` on a lost device, so an incomplete frame is first kept as the loss suspect
+//! for the device-loss report, and panics the worker only when a later frame completes and so
+//! proves the device alive (GB review r1 W1): an intermittent break panics one verified frame
+//! late. A systematic break (a marker that never lands, so no frame ever completes) never panics;
+//! it is RED here only through `frames_incomplete`, as it is in G4's path workers
+//! (`boot_validation_clean`) and in the G5 driver's witness (GB review r2 W1).
 //!
 //! # Running it
 //!
