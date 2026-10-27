@@ -655,6 +655,14 @@ fn run_worker(worker: Worker) {
     if worker == Worker::DeferredSsaa {
         app.insert_resource(AaConfig { mode: AaMode::Ssaa });
     }
+    // Render rung GB (G4): every path worker boots with the GPU crash diagnostics at their
+    // highest level, so this gate also proves the labels, breadcrumbs, checkpoints and the fault
+    // feature validation-clean on every configuration it boots — a strict superset of the
+    // default boot (each piece the device lacks degrades with W2107 and records nothing). The
+    // canary stays at the default: its job is to prove the oracle hears, not to vary the subject.
+    if worker != Worker::Canary {
+        app.insert_resource(boyko_app::GpuCrashDiag { level: boyko_app::GpuCrashDiagLevel::Checkpoints });
+    }
 
     app.run();
 

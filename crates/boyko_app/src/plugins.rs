@@ -618,6 +618,12 @@ impl Plugin for EnginePlugins {
         if let Some(cfg) = render_path_config_from_env() {
             app.insert_resource(cfg);
         }
+        // Render rung GB: the `BOYKO_GPU_CRASH_DIAG` dev seam, on the same terms — inserted during
+        // `build()`, so a scene's own later `insert_resource(GpuCrashDiag)` wins; unset (every
+        // golden run) inserts nothing and the runner boots at `Off`.
+        if let Some(diag) = crate::gpu_crash::gpu_crash_diag_from_env() {
+            app.insert_resource(diag);
+        }
 
         // The R7 SDF instance path (composed by DEFAULT): inserts the
         // `SdfEditStaging` gather scratch and registers the one-shot startup

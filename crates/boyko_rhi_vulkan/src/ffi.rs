@@ -643,6 +643,14 @@ pub enum VkStructureType {
     /// promoted from `VK_EXT_pipeline_creation_feedback`, extension 193). vulkan_core.h:
     /// `1000192000`.
     PipelineCreationFeedbackCreateInfo = 1_000_192_000,
+    /// `VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT` (render rung GB: resource names).
+    /// `VK_EXT_debug_utils` is extension 129, so its block is `1000000000 + 128 * 1000`.
+    DebugUtilsObjectNameInfoExt = 1_000_128_000,
+    /// `VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT` (render rung GB: pass labels).
+    DebugUtilsLabelExt = 1_000_128_002,
+    /// `VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV` (render rung GB: the post-loss checkpoint read).
+    /// `VK_NV_device_diagnostic_checkpoints` is extension 207.
+    CheckpointDataNv = 1_000_206_000,
 }
 
 // ---------------------------------------------------------------------------
@@ -4219,3 +4227,119 @@ pub const VK_PIPELINE_STAGE_HOST_BIT: VkFlags = 0x0000_4000;
 /// `VK_ACCESS_HOST_READ_BIT` — a host read of device memory, the destination access of that
 /// dependency (OBS, `host_read.rs`).
 pub const VK_ACCESS_HOST_READ_BIT: VkFlags = 0x0000_2000;
+
+// ---------------------------------------------------------------------------
+// Render rung GB — GPU crash diagnostics: debug-utils labels and object names.
+// ---------------------------------------------------------------------------
+
+/// `VkObjectType::VK_OBJECT_TYPE_COMMAND_BUFFER` — the `objectType` of a command-buffer name.
+pub const VK_OBJECT_TYPE_COMMAND_BUFFER: i32 = 6;
+/// `VkObjectType::VK_OBJECT_TYPE_BUFFER`.
+pub const VK_OBJECT_TYPE_BUFFER: i32 = 9;
+/// `VkObjectType::VK_OBJECT_TYPE_IMAGE`.
+pub const VK_OBJECT_TYPE_IMAGE: i32 = 10;
+
+/// `VkDebugUtilsLabelEXT` — one command-buffer label region's name (render rung GB). `color` is
+/// all zero, which the spec defines as "no colour".
+#[repr(C)]
+pub struct VkDebugUtilsLabelExt {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    /// A NUL-terminated UTF-8 name; read only during the call.
+    pub p_label_name: *const c_char,
+    pub color: [f32; 4],
+}
+
+/// `VkDebugUtilsObjectNameInfoEXT` — the name a capture tool shows for one Vulkan object.
+#[repr(C)]
+pub struct VkDebugUtilsObjectNameInfoExt {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    /// `VkObjectType` (`VK_OBJECT_TYPE_*`).
+    pub object_type: i32,
+    /// The handle as a `u64`: a non-dispatchable handle's value, or a dispatchable handle's
+    /// pointer cast to an integer. Never NULL (`VUID-VkDebugUtilsObjectNameInfoEXT-objectType-02590`).
+    pub object_handle: u64,
+    /// A NUL-terminated UTF-8 name; read only during the call.
+    pub p_object_name: *const c_char,
+}
+
+const _: () = assert!(core::mem::size_of::<VkDebugUtilsLabelExt>() == 40);
+const _: () = assert!(core::mem::align_of::<VkDebugUtilsLabelExt>() == 8);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsLabelExt, p_label_name) == 16);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsLabelExt, color) == 24);
+const _: () = assert!(core::mem::size_of::<VkDebugUtilsObjectNameInfoExt>() == 40);
+const _: () = assert!(core::mem::align_of::<VkDebugUtilsObjectNameInfoExt>() == 8);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsObjectNameInfoExt, object_type) == 16);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsObjectNameInfoExt, object_handle) == 24);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsObjectNameInfoExt, p_object_name) == 32);
+
+/// `PFN_vkCmdBeginDebugUtilsLabelEXT` — opens a label region in a command buffer.
+pub type PfnVkCmdBeginDebugUtilsLabelExt = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    p_label_info: *const VkDebugUtilsLabelExt,
+);
+
+/// `PFN_vkCmdEndDebugUtilsLabelEXT` — closes the innermost open label region.
+pub type PfnVkCmdEndDebugUtilsLabelExt = unsafe extern "system" fn(command_buffer: VkCommandBuffer);
+
+/// `PFN_vkSetDebugUtilsObjectNameEXT` — names one object for capture tools and validation text.
+pub type PfnVkSetDebugUtilsObjectNameExt = unsafe extern "system" fn(
+    device: VkDevice,
+    p_name_info: *const VkDebugUtilsObjectNameInfoExt,
+) -> i32;
+
+// --- Render rung GB — breadcrumbs: `VK_AMD_buffer_marker` and `VK_NV_device_diagnostic_checkpoints`. ---
+
+/// `VK_AMD_buffer_marker` device-extension name (render rung GB breadcrumbs).
+pub const VK_AMD_BUFFER_MARKER_EXTENSION_NAME: &core::ffi::CStr = c"VK_AMD_buffer_marker";
+/// `VK_NV_device_diagnostic_checkpoints` device-extension name (render rung GB checkpoints).
+pub const VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME: &core::ffi::CStr =
+    c"VK_NV_device_diagnostic_checkpoints";
+
+/// `VK_PIPELINE_STAGE_ALL_COMMANDS_BIT` — the source stage of GB's frame-close host-read barrier:
+/// a breadcrumb write is a transfer write performed at TOP_OF_PIPE or BOTTOM_OF_PIPE, which no
+/// narrower stage mask covers.
+pub const VK_PIPELINE_STAGE_ALL_COMMANDS_BIT: VkFlags = 0x0001_0000;
+
+/// `PFN_vkCmdWriteBufferMarkerAMD` — the **sync1** breadcrumb write: once every command before it
+/// reaches `pipeline_stage`, writes `marker` to `dst_buffer` at `dst_offset` (4-aligned). The
+/// sync2 variant is not used: it needs the `synchronization2` feature enabled, which this device
+/// does not enable.
+pub type PfnVkCmdWriteBufferMarkerAmd = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    // `pipeline_stage`: one `VkPipelineStageFlagBits` (TOP_OF_PIPE or BOTTOM_OF_PIPE here).
+    pipeline_stage: VkFlags,
+    dst_buffer: VkBuffer,
+    dst_offset: u64,
+    marker: u32,
+);
+
+/// `PFN_vkCmdSetCheckpointNV` — records an opaque pointer-sized checkpoint marker the driver
+/// reports, per pipeline stage, after a device loss. The pointer is never dereferenced by anyone.
+pub type PfnVkCmdSetCheckpointNv =
+    unsafe extern "system" fn(command_buffer: VkCommandBuffer, p_checkpoint_marker: *const c_void);
+
+/// `VkCheckpointDataNV` — one (stage, last checkpoint marker) pair of a lost queue.
+#[repr(C)]
+pub struct VkCheckpointDataNv {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    /// One `VkPipelineStageFlagBits`.
+    pub stage: VkFlags,
+    pub p_checkpoint_marker: *mut c_void,
+}
+
+const _: () = assert!(core::mem::size_of::<VkCheckpointDataNv>() == 32);
+const _: () = assert!(core::mem::align_of::<VkCheckpointDataNv>() == 8);
+const _: () = assert!(core::mem::offset_of!(VkCheckpointDataNv, stage) == 16);
+const _: () = assert!(core::mem::offset_of!(VkCheckpointDataNv, p_checkpoint_marker) == 24);
+
+/// `PFN_vkGetQueueCheckpointDataNV` — the **sync1** two-call read of a lost queue's checkpoints
+/// (`VUID-vkGetQueueCheckpointDataNV-queue-02025`: the device must be lost). The `2NV` variant
+/// needs `VK_KHR_synchronization2`, which this device does not enable.
+pub type PfnVkGetQueueCheckpointDataNv = unsafe extern "system" fn(
+    queue: VkQueue,
+    p_checkpoint_data_count: *mut u32,
+    p_checkpoint_data: *mut VkCheckpointDataNv,
+);

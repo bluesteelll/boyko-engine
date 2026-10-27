@@ -3256,6 +3256,10 @@ impl Renderer<'_> {
         // Render wave PX0: `ZONE_POST_PRESENT` brackets Pass C from the swapchain barrier through
         // `cmd_end_rendering`; the image dump, the readback copy and the present transition are
         // outside it.
+        // Render rung GB: the hand-recorded swapchain blit + present transition get their own scope.
+        if self.crumbs_armed() {
+            self.crumb_enter_host(cmd, super::super::gpu_crumbs::HostScope::PresentBlit);
+        }
         let present_zone = super::zone_arm::ZoneArm::from_scene(scene);
         // SAFETY: recording is open and no rendering scope is (the AA passes above closed
         // theirs); `ts` reset this frame's pool at the frame top and seals the slot at
@@ -3574,6 +3578,11 @@ impl Renderer<'_> {
         // that frame resets nothing, writes nothing, and its caller never reaches a readback.
         ts.finish();
 
+        // Render rung GB: close the last scope and the frame scope (and, with breadcrumbs, make the
+        // slot's markers host-visible) — the frame's last commands before its end.
+        if self.crumbs_armed() {
+            self.crumb_frame_close(cmd);
+        }
         // SAFETY: recording is open; ending it matches the `begin` above.
         let raw = unsafe { (self.fns.end_command_buffer)(cmd) };
         let result = VkResult::from_raw(raw);

@@ -248,7 +248,13 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // BOOT-1 F-A: the per-user persisted pipeline cache (`BOYKO_PIPELINE_CACHE_DIR` overrides the
     // directory; `BOYKO_PIPELINE_CACHE=off` disables it).
     let cache_policy = boyko_rhi_vulkan::pipeline_cache::PipelineCachePolicy::per_user_from_env();
-    let ctx = match VulkanContext::boot_singleton(config, cache_policy) {
+    // Render rung GB: the GPU crash-diagnostics level, read once (absent ⇒ `Off`) — device
+    // extensions are boot-frozen.
+    let gpu_crash = app
+        .world()
+        .try_resource::<crate::gpu_crash::GpuCrashDiag>()
+        .map_or(crate::gpu_crash::GpuCrashDiagLevel::Off, |d| d.level);
+    let ctx = match VulkanContext::boot_singleton_with_diag(config, cache_policy, gpu_crash) {
         Ok(c) => c,
         Err(e) => {
             crate::diag::report_boot_stage_failed("vulkan device", &e);

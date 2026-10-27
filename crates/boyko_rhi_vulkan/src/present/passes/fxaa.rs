@@ -46,6 +46,10 @@ impl Renderer<'_> {
         fi: usize,
         zone: ZoneArm<'_>,
     ) {
+        // Render rung GB: FXAA / SMAA are hand-recorded, so they enter their own scope.
+        if self.crumbs_armed() {
+            self.crumb_enter_host(cmd, super::super::gpu_crumbs::HostScope::Fxaa);
+        }
         debug_assert!(
             present_extent.width > 0 && present_extent.height > 0,
             "invariant: aa_out is sized to a non-empty present_extent"

@@ -188,6 +188,25 @@ pub const DYN_NAME_BYTES: usize = generated::DYN_NAME_BYTES;
 /// that made the feature opt-in rather than default-on.
 pub const ANALYSIS_ADMITTED: bool = generated::ANALYSIS_ADMITTED;
 
+/// The highest GPU crash-diagnostics level this build lets a run arm, as a raw [`u8`].
+///
+/// `0 = Off, 1 = Fault, 2 = Labels, 3 = Markers, 4 = Checkpoints` — the numbering is
+/// `boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel`'s, which this crate does not name, for the
+/// reason [`LOG_CEILING`] is a `u8`. The rows are `dev` 4 · `editor` 4 · `shipping` /
+/// `shipping-min` / `off` 0, and `BOYKO_PROFILE=custom` takes `BOYKO_GPU_CRASH_DIAG_MAX`
+/// (`off|fault|labels|markers|checkpoints`).
+///
+/// Read by render rung GB (pass labels, breadcrumbs, the device-fault report). Every GB site is
+/// gated `GpuCrashDiagLevel::CEILING as u8 != 0 && <the renderer's armed byte>`, so a `0` here is
+/// a `const false` at the head of each `&&` chain: the sites, their `#[cold]` bodies and the
+/// extension entry-point names they load are deleted from the image, which is what the shipping
+/// census (`boyko_app/tests/gpu_crash_shipping_census.rs`) checks by scanning the linked binary.
+/// A runtime level above the ceiling is clamped to it, never refused.
+///
+/// `Fault` costs no per-frame work but would ship crash telemetry to players, so the shipping
+/// rows hold `0` until the owner decides otherwise.
+pub const GPU_CRASH_DIAG_CEILING: u8 = generated::GPU_CRASH_DIAG_CEILING;
+
 // NO assertion that this value is in range, and NO pin on the number itself. The two are refused
 // for different reasons, and the difference is the one worth keeping:
 //
@@ -220,8 +239,8 @@ pub const ANALYSIS_ADMITTED: bool = generated::ANALYSIS_ADMITTED;
 #[cfg(test)]
 mod tests {
     use super::{
-        ANALYSIS_ADMITTED, DYN_NAME_BYTES, ENGINE_ZONE_SLOTS, LOG_CEILING, MAX_USER_BUDGET,
-        PROFILE_NAME, PROFILING_TIER, REGION_CAPACITY,
+        ANALYSIS_ADMITTED, DYN_NAME_BYTES, ENGINE_ZONE_SLOTS, GPU_CRASH_DIAG_CEILING, LOG_CEILING,
+        MAX_USER_BUDGET, PROFILE_NAME, PROFILING_TIER, REGION_CAPACITY,
     };
 
     /// One row of the axis, spelled out rather than positional.
@@ -240,6 +259,7 @@ mod tests {
         max_user_budget: usize,
         dyn_name_bytes: usize,
         analysis_admitted: bool,
+        gpu_crash_ceiling: u8,
     }
 
     /// The axis as `SEAM.md` §S9 tables it, restated here so the two can disagree.
@@ -247,11 +267,11 @@ mod tests {
     /// `custom` is deliberately absent — it is the one profile that does *not* have a fixed row,
     /// which is exactly what makes it the escape hatch.
     const TABLE: &[Row] = &[
-        Row { name: "dev", log_ceiling: 5, profiling_tier: 2, region_capacity: 1024, engine_zone_slots: 4096, max_user_budget: 3072, dyn_name_bytes: 64 * 1024, analysis_admitted: true },
-        Row { name: "editor", log_ceiling: 4, profiling_tier: 1, region_capacity: 1024, engine_zone_slots: 4096, max_user_budget: 3072, dyn_name_bytes: 64 * 1024, analysis_admitted: true },
-        Row { name: "shipping", log_ceiling: 3, profiling_tier: 0, region_capacity: 128, engine_zone_slots: 256, max_user_budget: 512, dyn_name_bytes: 8 * 1024, analysis_admitted: false },
-        Row { name: "shipping-min", log_ceiling: 2, profiling_tier: 0, region_capacity: 128, engine_zone_slots: 256, max_user_budget: 512, dyn_name_bytes: 8 * 1024, analysis_admitted: false },
-        Row { name: "off", log_ceiling: 0, profiling_tier: 0, region_capacity: 128, engine_zone_slots: 256, max_user_budget: 512, dyn_name_bytes: 8 * 1024, analysis_admitted: false },
+        Row { name: "dev", log_ceiling: 5, profiling_tier: 2, region_capacity: 1024, engine_zone_slots: 4096, max_user_budget: 3072, dyn_name_bytes: 64 * 1024, analysis_admitted: true, gpu_crash_ceiling: 4 },
+        Row { name: "editor", log_ceiling: 4, profiling_tier: 1, region_capacity: 1024, engine_zone_slots: 4096, max_user_budget: 3072, dyn_name_bytes: 64 * 1024, analysis_admitted: true, gpu_crash_ceiling: 4 },
+        Row { name: "shipping", log_ceiling: 3, profiling_tier: 0, region_capacity: 128, engine_zone_slots: 256, max_user_budget: 512, dyn_name_bytes: 8 * 1024, analysis_admitted: false, gpu_crash_ceiling: 0 },
+        Row { name: "shipping-min", log_ceiling: 2, profiling_tier: 0, region_capacity: 128, engine_zone_slots: 256, max_user_budget: 512, dyn_name_bytes: 8 * 1024, analysis_admitted: false, gpu_crash_ceiling: 0 },
+        Row { name: "off", log_ceiling: 0, profiling_tier: 0, region_capacity: 128, engine_zone_slots: 256, max_user_budget: 512, dyn_name_bytes: 8 * 1024, analysis_admitted: false, gpu_crash_ceiling: 0 },
     ];
 
     /// The one thing about this module that is NOT decided by the compiler: that the constant is
@@ -263,7 +283,7 @@ mod tests {
         let _: u8 = crate::profile::LOG_CEILING;
     }
 
-    /// **J1's own gate**: whatever profile this build selected, all eight constants come from that
+    /// **J1's own gate**: whatever profile this build selected, all nine constants come from that
     /// profile's row and no other.
     ///
     /// The failure this catches is specific and is the reason a generated table is more dangerous
@@ -281,9 +301,12 @@ mod tests {
             // knobs are set, so "which row is this?" has no answer. The property that survives is
             // the one below.
             assert!(
-                (LOG_CEILING as usize) < 6 && (PROFILING_TIER as usize) < 3,
-                "custom produced LOG_CEILING={LOG_CEILING} PROFILING_TIER={PROFILING_TIER}, and \
-                 one of them names no level or no tier"
+                (LOG_CEILING as usize) < 6
+                    && (PROFILING_TIER as usize) < 3
+                    && (GPU_CRASH_DIAG_CEILING as usize) < 5,
+                "custom produced LOG_CEILING={LOG_CEILING} PROFILING_TIER={PROFILING_TIER} \
+                 GPU_CRASH_DIAG_CEILING={GPU_CRASH_DIAG_CEILING}, and one of them names no level \
+                 or no tier"
             );
             return;
         }
@@ -304,6 +327,7 @@ mod tests {
             max_user_budget: MAX_USER_BUDGET,
             dyn_name_bytes: DYN_NAME_BYTES,
             analysis_admitted: ANALYSIS_ADMITTED,
+            gpu_crash_ceiling: GPU_CRASH_DIAG_CEILING,
         };
         assert_eq!(
             got, *row,
@@ -311,5 +335,30 @@ mod tests {
              compiled against come from more than one profile, so nothing downstream can be said \
              to be built `shipping` or built `dev`"
         );
+    }
+
+    /// Render rung GB: a player-facing profile compiles the GPU crash diagnostics out.
+    ///
+    /// The row comparison above already pins the number; this states the consequence on its own
+    /// line, so a red reads as the property that broke rather than as a table mismatch. Run it
+    /// under `BOYKO_PROFILE=shipping` (and `shipping-min`, `off`) — in the default `dev` build it
+    /// checks the other half: a development profile admits every level.
+    ///
+    /// RED: set the `shipping` row's `gpu_crash_ceiling` to 4 in `build.rs` and run
+    /// `BOYKO_PROFILE=shipping cargo test -p boyko-diag`.
+    #[test]
+    fn player_profiles_compile_the_gpu_crash_diagnostics_out() {
+        match PROFILE_NAME {
+            "shipping" | "shipping-min" | "off" => assert_eq!(
+                GPU_CRASH_DIAG_CEILING, 0,
+                "{PROFILE_NAME} must compile GB out: its GPU_CRASH_DIAG_CEILING is \
+                 {GPU_CRASH_DIAG_CEILING}, so labels, markers and the fault query ship to players"
+            ),
+            "dev" | "editor" => assert_eq!(
+                GPU_CRASH_DIAG_CEILING, 4,
+                "{PROFILE_NAME} must admit every GPU crash-diagnostics level"
+            ),
+            _ => {}
+        }
     }
 }

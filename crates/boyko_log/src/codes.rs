@@ -968,6 +968,11 @@ codes! {
     // renders. The class letter IS the level in this registry, so one code could not carry both.
     (2106, W, W2106, RatePolicy::Every, CodeStatus::Live,
         "An optional shadow chain's sets failed to build, so the chain is skipped this frame"),
+    // Render rung GB. `Once` per SITE, `W2102`'s F11 shape: the four GPU crash-diagnostics pieces
+    // (labels, markers, checkpoints, the fault query) degrade independently, so each owns a latch
+    // and a device missing three of them prints three lines. A boot-time notice, never per frame.
+    (2107, W, W2107, RatePolicy::Once,  CodeStatus::Live,
+        "A requested GPU crash-diagnostics piece is unavailable on this device, so the run continues without it"),
     // ── L8a: `boyko_render` ─────────────────────────────────────────────────────────────────
     // The ledger gave `light_system.rs`'s TWO sites one code, `W2201`, with a `dropped_count`
     // argument. Measuring the fold refuted both halves of that row:

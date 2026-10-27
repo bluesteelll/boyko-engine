@@ -34,10 +34,11 @@ use core::mem;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use boyko_log::codes::{E2101, OnceSite, W2102};
+use boyko_log::codes::{E2101, OnceSite, W2102, W2107};
 
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
+use crate::gpu_crash::{DebugUtilsCmdFns, GpuCrashDiagLevel, GpuCrashState, piece};
 use crate::memory::{BlockPool, DeviceLocalBlock, HostVisibleBlock};
 use crate::pipeline_cache::{
     self, CacheLoad, CacheSave, DeviceIdentity, PipelineCachePolicy, PipelineCacheStore,
@@ -830,6 +831,11 @@ pub struct VulkanContext {
     /// The creation-feedback counters, updated after every create on the owning thread. A `Cell`
     /// of a `Copy` POD: the context is already `!Sync`.
     pipeline_stats: Cell<PipelineCreationStats>,
+    /// Render rung GB: what the boot armed for GPU crash diagnostics — the clamped level, the
+    /// pieces that survived the device probe and their entry points. [`GpuCrashState::OFF`] for
+    /// every boot that did not ask (`boot`, `boot_singleton`), and in every `shipping` build.
+    /// Immutable after boot; read through [`Self::gpu_crash`].
+    gpu_crash: GpuCrashState,
 }
 
 /// The retained OWNING pointer behind [`VulkanContext::boot_singleton`] /
@@ -857,14 +863,23 @@ impl VulkanContext {
     ///
     /// If `BOYKO_PIPELINE_CACHE` holds anything but `on` or `off`.
     pub fn boot(config: InstanceConfig) -> Result<Self, BootError> {
-        Self::boot_with_policy(config, PipelineCachePolicy::Ephemeral)
+        Self::boot_with_policy(config, PipelineCachePolicy::Ephemeral, GpuCrashDiagLevel::Off)
     }
 
-    /// The one boot body behind [`Self::boot`] and [`Self::boot_singleton`]. The
-    /// `BOYKO_PIPELINE_CACHE` switch is read here, once per boot and before anything is created,
-    /// so a bad value panics without leaking a device.
-    fn boot_with_policy(config: InstanceConfig, policy: PipelineCachePolicy) -> Result<Self, BootError> {
+    /// The one boot body behind [`Self::boot`], [`Self::boot_singleton`] and
+    /// [`Self::boot_singleton_with_diag`]. The `BOYKO_PIPELINE_CACHE` switch is read here, once per
+    /// boot and before anything is created, so a bad value panics without leaking a device.
+    ///
+    /// `gpu_crash` is the requested GPU crash-diagnostics level (render rung GB); it is clamped to
+    /// the build's ceiling here, once, before the instance exists, so every later read sees the
+    /// level this build can actually arm.
+    fn boot_with_policy(
+        config: InstanceConfig,
+        policy: PipelineCachePolicy,
+        gpu_crash: GpuCrashDiagLevel,
+    ) -> Result<Self, BootError> {
         let policy = policy.with_switch(pipeline_cache::switch_from_env());
+        let gpu_crash = gpu_crash.effective();
         // --- 0. Validation escape hatch. ---
         // Normalize `enable_validation` to its EFFECTIVE value ONCE, at the single
         // entry point, before `config` (passed BY VALUE / `Copy`) flows into
@@ -937,13 +952,20 @@ impl VulkanContext {
         };
 
         // --- 3. Create the instance (optional validation layer). ---
-        let instance = match create_instance(&global, get_instance_proc_addr, config) {
-            Ok(i) => i,
-            Err(e) => {
-                unsafe { free_vulkan_loader(module) };
-                return Err(e);
-            }
-        };
+        // Render rung GB: `VK_EXT_debug_utils` is also wanted for pass labels when the level
+        // reaches `Labels` — the `COMPILED_IN` conjunct folds the whole request away in a build
+        // whose ceiling is `Off`.
+        let want_labels = GpuCrashDiagLevel::COMPILED_IN && gpu_crash >= GpuCrashDiagLevel::Labels;
+        let (instance, labels_enabled) =
+            match create_instance(&global, get_instance_proc_addr, config, want_labels) {
+                Ok(i) => i,
+                Err(e) => {
+                    // SAFETY: `module` is the live HMODULE loaded above; this early-out path frees
+                    // it exactly once, before it is stored anywhere.
+                    unsafe { free_vulkan_loader(module) };
+                    return Err(e);
+                }
+            };
 
         // From here on, `instance` must be destroyed on every error path. A
         // small RAII-on-error helper keeps the early returns honest.
@@ -953,6 +975,7 @@ impl VulkanContext {
             get_instance_proc_addr,
             config,
             policy,
+            GpuCrashBoot { level: gpu_crash, labels_enabled },
         );
         match result {
             Ok(ctx) => Ok(ctx),
@@ -1003,6 +1026,28 @@ impl VulkanContext {
         config: InstanceConfig,
         cache: PipelineCachePolicy,
     ) -> Result<&'static VulkanContext, crate::error::VulkanError> {
+        Self::boot_singleton_with_diag(config, cache, GpuCrashDiagLevel::Off)
+    }
+
+    /// [`Self::boot_singleton`] with a GPU crash-diagnostics level (render rung GB).
+    ///
+    /// `gpu_crash` is clamped to this build's [`GpuCrashDiagLevel::CEILING`]; each piece it asks
+    /// for is enabled only when the device advertises it, and a missing one reports
+    /// `boyko-W2107` rather than failing the boot. What was armed is
+    /// [`gpu_crash`](Self::gpu_crash). [`GpuCrashDiagLevel::Off`] is exactly
+    /// [`Self::boot_singleton`]: no extension, no entry point.
+    ///
+    /// The level is a parameter rather than an [`InstanceConfig`] field because that struct is
+    /// built by literal at 62 sites, 16 of them without `..InstanceConfig::default()`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::boot_singleton`].
+    pub fn boot_singleton_with_diag(
+        config: InstanceConfig,
+        cache: PipelineCachePolicy,
+        gpu_crash: GpuCrashDiagLevel,
+    ) -> Result<&'static VulkanContext, crate::error::VulkanError> {
         // Advisory fast-fail so a contract-violating second boot does not
         // create (and immediately destroy) a whole second device. The
         // compare_exchange below remains the authority.
@@ -1011,7 +1056,7 @@ impl VulkanContext {
             return Err(crate::error::VulkanError::SingletonAlreadyBooted);
         }
 
-        let ctx = Self::boot_with_policy(config, cache)?;
+        let ctx = Self::boot_with_policy(config, cache, gpu_crash)?;
         let raw = Box::into_raw(Box::new(ctx));
 
         // Publish the owning pointer. Release on success: whoever observes
@@ -1129,6 +1174,7 @@ impl VulkanContext {
         gipa: PfnVkGetInstanceProcAddr,
         config: InstanceConfig,
         policy: PipelineCachePolicy,
+        gpu_crash_boot: GpuCrashBoot,
     ) -> Result<Self, (BootError, InstanceFns)> {
         let instance_fns = match load_instance_fns(gipa, instance, config) {
             Ok(f) => f,
@@ -1335,6 +1381,15 @@ impl VulkanContext {
         // a valid out-pointer for one `VkQueue`.
         unsafe { (device_fns.get_device_queue)(device, queue_family_index, 0, &mut queue) };
 
+        // Render rung GB: resolve the entry points of every piece the instance and the device
+        // armed. A shipping build's `COMPILED_IN` is `false`, which makes this `OFF` and deletes
+        // the loads with their entry-point names.
+        let gpu_crash = if GpuCrashDiagLevel::COMPILED_IN && gpu_crash_boot.level != GpuCrashDiagLevel::Off {
+            arm_gpu_crash(gipa, instance, gpu_crash_boot)
+        } else {
+            GpuCrashState::OFF
+        };
+
         // BOOT-1 F-A: the context's one pipeline cache, keyed by the identity the Vulkan cache
         // header itself carries (vendor, device, `pipelineCacheUUID`) plus the driver version —
         // never by build (check I2).
@@ -1412,6 +1467,7 @@ impl VulkanContext {
             pipeline_cache_guard: Cell::new(pipeline_cache_guard),
             pipeline_cache_load,
             pipeline_stats: Cell::new(PipelineCreationStats::default()),
+            gpu_crash,
         })
     }
 
@@ -1709,6 +1765,14 @@ impl VulkanContext {
     #[inline]
     pub fn validation_enabled(&self) -> bool {
         self.debug_state.is_some()
+    }
+
+    /// Render rung GB: what this boot armed for GPU crash diagnostics — the clamped level, the
+    /// armed [`piece`] bits and their entry points. [`GpuCrashState::OFF`] unless the context was
+    /// booted through [`Self::boot_singleton_with_diag`] with a level above `Off`.
+    #[inline]
+    pub fn gpu_crash(&self) -> &GpuCrashState {
+        &self.gpu_crash
     }
 
     /// The shared compute descriptor-set + pipeline layouts, created on first
@@ -2588,11 +2652,53 @@ fn report_sync_validation_absent() {
     }
 }
 
+/// The instance extensions one boot enables, in enable order — a pure function of its inputs so
+/// the GB-off array can be pinned against the pre-GB one without a device.
+///
+/// `VK_EXT_debug_utils` has ONE slot, wanted by validation (the messenger) or by GB's labels:
+/// enabling it twice would be invalid usage, and with both off it is not enabled at all.
+#[derive(Clone, Copy)]
+struct InstanceExtensionInputs {
+    validation: bool,
+    sync_validation: bool,
+    /// Render rung GB: the labels piece is armed and the instance advertises the extension.
+    labels: bool,
+    windowed: bool,
+}
+
+/// debug-utils + validation-features + the two WSI extensions.
+const MAX_INSTANCE_EXTENSIONS: usize = 4;
+
+fn instance_extension_list(i: InstanceExtensionInputs) -> ([&'static CStr; MAX_INSTANCE_EXTENSIONS], usize) {
+    let mut names: [&'static CStr; MAX_INSTANCE_EXTENSIONS] = [c""; MAX_INSTANCE_EXTENSIONS];
+    let mut count = 0usize;
+    if i.validation || i.labels {
+        names[count] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+        count += 1;
+    }
+    if i.sync_validation {
+        names[count] = VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME;
+        count += 1;
+    }
+    if i.windowed {
+        names[count] = VK_KHR_SURFACE_EXTENSION_NAME;
+        count += 1;
+        names[count] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
+        count += 1;
+    }
+    (names, count)
+}
+
+/// Creates the instance. Returns it with whether `VK_EXT_debug_utils` is enabled for GB's labels
+/// (render rung GB): `want_labels` asks, and the answer is `true` when validation already enabled
+/// the extension or the instance advertises it. An absent extension drops the labels piece with
+/// `boyko-W2107` — never a boot failure, unlike validation's own requirement on it.
 fn create_instance(
     global: &GlobalFns,
     _gipa: PfnVkGetInstanceProcAddr,
     config: InstanceConfig,
-) -> Result<VkInstance, BootError> {
+    want_labels: bool,
+) -> Result<(VkInstance, bool), BootError> {
     // When validation is requested, BOTH the layer and the `VK_EXT_debug_utils`
     // extension must be present, else the messenger (the oracle) cannot be
     // created — a missing oracle must never be invisible (plan §6). Query
@@ -2653,22 +2759,23 @@ fn create_instance(
         report_sync_validation_absent();
     }
 
-    let mut ext_ptrs: [*const c_char; 4] = [ptr::null(); 4];
-    let mut ext_count: u32 = 0;
-    if config.enable_validation {
-        ext_ptrs[ext_count as usize] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
+    // Render rung GB: with validation on, the extension was verified present above; without it
+    // the labels piece probes for itself, and an enumeration failure reads as "absent" — a
+    // diagnostics piece must never fail a boot.
+    let labels = want_labels
+        && (config.enable_validation || is_debug_utils_extension_present(global).unwrap_or(false));
+    if want_labels && !labels {
+        report_gpu_crash_piece_unavailable(&W2107_LABELS_SITE, "labels", "the instance does not advertise VK_EXT_debug_utils");
     }
-    if sync_validation_available {
-        ext_ptrs[ext_count as usize] = VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-    }
-    if config.windowed {
-        ext_ptrs[ext_count as usize] = VK_KHR_SURFACE_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-        ext_ptrs[ext_count as usize] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-    }
+
+    let (ext_names, ext_count) = instance_extension_list(InstanceExtensionInputs {
+        validation: config.enable_validation,
+        sync_validation: sync_validation_available,
+        labels,
+        windowed: config.windowed,
+    });
+    let ext_ptrs: [*const c_char; MAX_INSTANCE_EXTENSIONS] = ext_names.map(CStr::as_ptr);
+    let ext_count = ext_count as u32;
     let pp_exts: *const *const c_char = if ext_count == 0 {
         ptr::null()
     } else {
@@ -2754,7 +2861,7 @@ fn create_instance(
     if !result.is_success() {
         return Err(BootError::VkError("vkCreateInstance", result));
     }
-    Ok(instance)
+    Ok((instance, labels))
 }
 
 /// Whether `VK_LAYER_KHRONOS_validation` is installed (queried via the global
@@ -3876,6 +3983,79 @@ fn report_ssao_denoise_storage_unsupported() {
     }
 }
 
+// ── `boyko-W2107` — a requested GPU crash-diagnostics piece is unavailable (render rung GB) ─────
+//
+// One reporter, four latches, for `W2102`'s F11 reason: each piece (labels, markers, checkpoints,
+// the fault query) degrades independently, and a code-scoped `Once` would report the first and
+// lose the rest. The latch is the CALLER's, so a test can reset each one.
+
+/// `boyko-W2107`, site 1 — the labels piece (`VK_EXT_debug_utils`).
+pub(crate) static W2107_LABELS_SITE: OnceSite = OnceSite::new();
+/// `boyko-W2107`, site 2 — the markers piece (`VK_AMD_buffer_marker`, or its buffer).
+pub(crate) static W2107_MARKERS_SITE: OnceSite = OnceSite::new();
+
+/// `boyko-W2107` — a GPU crash-diagnostics piece the arming level asked for is unavailable on
+/// this device, so the run continues without it. `site` is the piece's own latch.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_gpu_crash_piece_unavailable(site: &OnceSite, piece_name: &str, why: &str) {
+    if site.claim() {
+        boyko_log::warn!(
+            boyko_log::RhiVulkan,
+            W2107,
+            "the requested GPU crash-diagnostics piece {} is unavailable ({}) - continuing without it",
+            piece_name,
+            why
+        );
+    }
+}
+
+/// The two GB decisions `boot_with_policy` hands `boot_with_instance` (render rung GB).
+#[derive(Clone, Copy)]
+struct GpuCrashBoot {
+    /// The requested level, already clamped to the build ceiling.
+    level: GpuCrashDiagLevel,
+    /// `create_instance` enabled `VK_EXT_debug_utils` for the labels piece.
+    labels_enabled: bool,
+}
+
+/// Resolves the entry points of every GB piece the instance and the device armed, dropping (with
+/// `boyko-W2107`) a piece whose entry points do not resolve. Cold: once per boot, and only when a
+/// level above `Off` was asked for.
+#[cold]
+#[inline(never)]
+fn arm_gpu_crash(gipa: PfnVkGetInstanceProcAddr, instance: VkInstance, boot: GpuCrashBoot) -> GpuCrashState {
+    let mut state = GpuCrashState { level: boot.level, ..GpuCrashState::OFF };
+    if boot.labels_enabled {
+        state.debug_utils = load_debug_utils_cmd_fns(gipa, instance);
+        if state.debug_utils.is_some() {
+            state.pieces |= piece::LABELS;
+        } else {
+            report_gpu_crash_piece_unavailable(
+                &W2107_LABELS_SITE,
+                "labels",
+                "the VK_EXT_debug_utils entry points did not resolve",
+            );
+        }
+    }
+    state
+}
+
+/// The three `VK_EXT_debug_utils` entry points GB's labels use, through `vkGetInstanceProcAddr`
+/// (the loader trampolines dispatch them to the device). `None` if any is missing.
+fn load_debug_utils_cmd_fns(gipa: PfnVkGetInstanceProcAddr, instance: VkInstance) -> Option<DebugUtilsCmdFns> {
+    // SAFETY: `gipa` is the live instance's `vkGetInstanceProcAddr` and `instance` was created
+    // with `VK_EXT_debug_utils` enabled (the caller's `labels_enabled`), so these names resolve to
+    // the extension's commands or to NULL; each `T` is the PFN typedef of its name's ABI.
+    unsafe {
+        Some(DebugUtilsCmdFns {
+            begin_label: load_instance_command(gipa, instance, c"vkCmdBeginDebugUtilsLabelEXT").ok()?,
+            end_label: load_instance_command(gipa, instance, c"vkCmdEndDebugUtilsLabelEXT").ok()?,
+            set_object_name: load_instance_command(gipa, instance, c"vkSetDebugUtilsObjectNameEXT").ok()?,
+        })
+    }
+}
+
 /// Queries the minimal Render P1b [`DeviceCaps`]: whether the GPU advertises (T-dev)
 /// the 5 bindless-prerequisite `VkPhysicalDeviceDescriptorIndexingFeatures` bits
 /// (chained into `vkGetPhysicalDeviceFeatures2` — the SAME granular struct
@@ -4883,6 +5063,70 @@ mod tests {
         super::report_shadow_denoise_storage_unsupported(false, true);
         drain();
         assert_eq!(observed(), after_first, "a spent Once site let a second W2102 through");
+    }
+
+    /// **`boyko-W2107`: one latch per GB piece, one record per piece** (render rung GB) — the
+    /// `W2102` shape: each piece degrades on its own, so each must report on its own.
+    ///
+    /// RED: hand every call the same latch and this asserts `1 == SITES`.
+    #[test]
+    fn w2107_reports_each_unavailable_piece_once() {
+        let _guard = ENV_AND_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _observe = observe_lock();
+        arm();
+        let sites = [(&super::W2107_LABELS_SITE, "labels"), (&super::W2107_MARKERS_SITE, "markers")];
+        for (site, _) in sites {
+            site.reset();
+        }
+        let before = observed();
+        for (site, name) in sites {
+            super::report_gpu_crash_piece_unavailable(site, name, "test");
+        }
+        drain();
+        assert_eq!(observed() - before, sites.len() as u64, "boyko-W2107 must report every unavailable piece");
+        let after_first = observed();
+        for (site, name) in sites {
+            super::report_gpu_crash_piece_unavailable(site, name, "test");
+        }
+        drain();
+        assert_eq!(observed(), after_first, "each W2107 site is Once");
+    }
+
+    /// Render rung GB: with the labels piece off, the instance extension array is exactly the
+    /// pre-GB one for every validation/WSI combination — GB off adds no extension. With it on,
+    /// `VK_EXT_debug_utils` takes its one shared slot, never a second one beside validation's.
+    ///
+    /// RED: push the extension a second time for `labels` and the validation-on rows repeat it.
+    #[test]
+    fn gb_off_instance_extensions_are_the_pre_gb_array() {
+        use super::{InstanceExtensionInputs, instance_extension_list};
+        for bits in 0u8..8 {
+            let validation = bits & 1 != 0;
+            let sync_validation = validation && bits & 2 != 0;
+            let windowed = bits & 4 != 0;
+            // The pre-GB construction, spelled as it was.
+            let mut want: Vec<&core::ffi::CStr> = Vec::new();
+            if validation {
+                want.push(super::VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            }
+            if sync_validation {
+                want.push(super::VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+            }
+            if windowed {
+                want.push(super::VK_KHR_SURFACE_EXTENSION_NAME);
+                want.push(super::VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+            }
+            let off = InstanceExtensionInputs { validation, sync_validation, labels: false, windowed };
+            let (names, count) = instance_extension_list(off);
+            assert_eq!(&names[..count], &want[..], "GB off changed the instance extensions");
+
+            let (on, on_count) = instance_extension_list(InstanceExtensionInputs { labels: true, ..off });
+            let debug_utils = on[..on_count]
+                .iter()
+                .filter(|n| **n == super::VK_EXT_DEBUG_UTILS_EXTENSION_NAME)
+                .count();
+            assert_eq!(debug_utils, 1, "VK_EXT_debug_utils has one slot (validation={validation})");
+        }
     }
 }
 

@@ -4157,6 +4157,11 @@ impl Renderer<'_> {
                 (&buffers.meta, &buffers.handles.map(|h| h.0), &other_buffers.handles.map(|h| h.0)),
             );
         }
+        // Render rung GB: this pass's chained scope (label, breadcrumbs, checkpoints) opens here,
+        // before its barriers, and runs to the next scope. The sink fill above records nothing.
+        if self.crumbs_armed() {
+            self.crumb_enter_pass(cmd, pass, &images.handles, &buffers.handles, FRAMEGRAPH_IMAGE_COUNT);
+        }
         let mut sink = GbufferBarrierSink {
             fns: self.fns,
             cmd,
@@ -4201,6 +4206,11 @@ impl Renderer<'_> {
                 (&images.meta, &images.handles.map(|h| h.0), &other_images.handles.map(|h| h.0)),
                 (&buffers.meta, &buffers.handles.map(|h| h.0), &other_buffers.handles.map(|h| h.0)),
             );
+        }
+        // Render rung GB: this pass's chained scope (label, breadcrumbs, checkpoints) opens here,
+        // before its barriers, and runs to the next scope. The sink fill above records nothing.
+        if self.crumbs_armed() {
+            self.crumb_enter_pass(cmd, pass, &images.handles, &buffers.handles, FORWARD_IMAGE_COUNT);
         }
         let mut sink = ForwardBarrierSink {
             fns: self.fns,
@@ -7640,6 +7650,11 @@ impl Renderer<'_> {
                 (&images.meta, &images.handles.map(|h| h.0), &other_images.handles.map(|h| h.0)),
                 (&buffers.meta, &buffers.handles.map(|h| h.0), &other_buffers.handles.map(|h| h.0)),
             );
+        }
+        // Render rung GB: this pass's chained scope (label, breadcrumbs, checkpoints) opens here,
+        // before its barriers, and runs to the next scope. The sink fill above records nothing.
+        if self.crumbs_armed() {
+            self.crumb_enter_pass(cmd, pass, &images.handles, &buffers.handles, VB_IMAGE_COUNT);
         }
         let mut sink = VbBarrierSink {
             fns: self.fns,
