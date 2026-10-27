@@ -1302,8 +1302,10 @@ impl DeviceLostReport {
         for (o, s) in order.iter_mut().zip(self.slots.iter()) {
             *o = s.as_ref();
         }
-        // Newest serial first (serials never take 0 and wrap after 2^32 armed frames).
-        order.sort_by(|a, b| b.map(|s| s.serial).cmp(&a.map(|s| s.serial)));
+        // Newest serial first (serials never take 0 and wrap after 2^32 armed frames). Unstable
+        // and in place: two entries with distinct serials (or `None`s, which print nothing) have
+        // no order to keep, and the stable sort's scratch is a heap site (UG-02).
+        order.sort_unstable_by(|a, b| b.map(|s| s.serial).cmp(&a.map(|s| s.serial)));
         let mut any_in_flight = false;
         let mut any_armed = false;
         if markers {
