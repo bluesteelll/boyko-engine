@@ -3119,9 +3119,9 @@ impl Renderer<'_> {
             // whose targets were built with the NaN arming; `fi` is this frame's slot.
             unsafe { self.record_test_nan_inject(cmd, targets, fi) };
         }
-        // Render rung GB (G3): the TEST-ONLY hang pass, recorded iff declared (the armed frame of
-        // the opted-in forced-hang gate, never a shipped run). Its funnel call opens its scope.
-        if let Some(pass) = self
+        // Render rung GB (G3): the TEST-ONLY hang pass, recorded iff declared (the forced-hang gate's
+        // armed frame); its funnel call opens its scope. `COMPILED_IN` first: no branch in `shipping`.
+        if crate::gpu_crash::GpuCrashDiagLevel::COMPILED_IN && let Some(pass) = self
             .gbuffer_pass_plan
             .as_ref()
             .expect("invariant: declare_frame_graph ran before record_gbuffer").test_gpu_hang {
