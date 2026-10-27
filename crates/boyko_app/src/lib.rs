@@ -57,6 +57,9 @@ mod device;
 // one platform that needs it.
 mod diag;
 mod fly;
+// Render rung GB: the GPU crash-diagnostics owner knob and its dev seam. NOT `#[cfg(windows)]`:
+// it is a plain `Resource` fixtures insert, naming no device and no OS.
+pub mod gpu_crash;
 #[cfg(windows)]
 mod gpu_scene;
 #[cfg(windows)]
@@ -162,6 +165,7 @@ boyko_diag::profiling_partition!(Engine);
 pub use boyko_rhi_vulkan::window::pump_boot_messages;
 pub use device::GpuDevice;
 pub use fly::{FlyAction, FlyCameraPlugin, fly_default_map};
+pub use gpu_crash::{GpuCrashDiag, GpuCrashDiagLevel, GpuCrumbLedger};
 pub use occlusion_force::OcclusionForce;
 pub use plugins::EnginePlugins;
 pub use timer_resolution::TimerResolutionGuard;

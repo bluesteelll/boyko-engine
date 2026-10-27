@@ -5,6 +5,8 @@
 //! engine frame `Renderer::arm_nan_inject` named. Never recorded on a shipped run: the
 //! `test_nan_inject` graph pass is declared only under the `inject_nan_lit` force key. The caller
 //! emits the pass's derived barriers (`lit` → `TRANSFER_DST_OPTIMAL`) through its own sink first.
+//!
+//! Also render rung GB's `Renderer::record_test_gpu_hang`, the forced-hang gate's (G3) body seam.
 
 use crate::ffi::*;
 
@@ -12,6 +14,22 @@ use super::super::frame_driver::Renderer;
 use super::super::targets::{GBufferTargets, NAN_INJECT_TEXEL};
 
 impl Renderer<'_> {
+    /// Render rung GB (G3): the TEST-ONLY forced-hang body, recorded inside the `test_gpu_hang`
+    /// scope on the one armed frame.
+    ///
+    /// **It records nothing yet, by the cut's decision (GB cut D10 / Q2).** A shader-free long
+    /// dispatch is not guaranteed to reach a device loss under WDDM hardware scheduling with
+    /// compute preemption, and the standard primitive — a dedicated long-running compute shader —
+    /// is a new `.spv` + dxc recipe + `*_spv_sync` gate, which belongs to the shader-SDK lane. The
+    /// seam (force key, opt-in, declaration, scope, report, gate) lands now; the primitive fills
+    /// this one function after that lane merges. Until then the forced-hang gate's driver reports
+    /// "no device loss within its deadline" — its own distinct outcome, never a pass.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn record_test_gpu_hang(&self, cmd: VkCommandBuffer) {
+        let _ = cmd;
+    }
+
     /// Records the one-texel copy of `targets.nan_inject_src` into `lit[fi]` at
     /// [`NAN_INJECT_TEXEL`].
     ///

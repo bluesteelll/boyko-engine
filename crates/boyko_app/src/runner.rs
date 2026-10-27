@@ -248,7 +248,13 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // BOOT-1 F-A: the per-user persisted pipeline cache (`BOYKO_PIPELINE_CACHE_DIR` overrides the
     // directory; `BOYKO_PIPELINE_CACHE=off` disables it).
     let cache_policy = boyko_rhi_vulkan::pipeline_cache::PipelineCachePolicy::per_user_from_env();
-    let ctx = match VulkanContext::boot_singleton(config, cache_policy) {
+    // Render rung GB: the GPU crash-diagnostics level, read once (absent ⇒ `Off`) — device
+    // extensions are boot-frozen.
+    let gpu_crash = app
+        .world()
+        .try_resource::<crate::gpu_crash::GpuCrashDiag>()
+        .map_or(crate::gpu_crash::GpuCrashDiagLevel::Off, |d| d.level);
+    let ctx = match VulkanContext::boot_singleton_with_diag(config, cache_policy, gpu_crash) {
         Ok(c) => c,
         Err(e) => {
             crate::diag::report_boot_stage_failed("vulkan device", &e);
@@ -481,6 +487,15 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     // The R4 host probe (WindowInfo-adjacent, same post-present publish step):
     // lets headless smokes assert the light-upload gating + CSM arming decisions.
     app.world_mut().insert_resource(HostFrameStats::default());
+    // Render rung GB: the arming witness — present iff some GPU crash-diagnostics piece armed.
+    if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN && ctx.gpu_crash().pieces != 0 {
+        app.world_mut().insert_resource(crate::gpu_crash::GpuCrumbLedger {
+            level: ctx.gpu_crash().level,
+            pieces: ctx.gpu_crash().pieces,
+            frame_pieces: host.renderer.gpu_crumb_pieces(),
+            counts: boyko_rhi_vulkan::gpu_crash::CrumbLedger::default(),
+        });
+    }
 
     // ── SDFDDGI I2 (plan §3): OVERRIDE the `DdgiPlugin`'s default `DdgiCaps`
     // (storage_ok = true) with the REAL device query now that the device is
@@ -1029,6 +1044,11 @@ pub(crate) fn run_windowed(app: &mut App, desc: WindowDesc) -> AppExit {
     if !app.world().resource::<AppExit>().0 {
         frame_loop(app, &mut host, ctx);
     }
+    // Render rung GB: the final breadcrumb ledger (and the `BOYKO_GPU_CRASH_WITNESS` file when
+    // asked), read while the renderer still exists. Folded away in a `shipping` build.
+    if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN {
+        crate::gpu_crash::finish_run(app, host.renderer.gpu_crumb_ledger());
+    }
 
     teardown(app, host, ctx);
     // After every host destroy, before `destroy_singleton` clears the pools this reads.
@@ -1296,6 +1316,18 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     {
         host.renderer.arm_nan_inject(crate::test_force::INJECT_NAN_LIT_FRAME);
     }
+    // Render rung GB (G3): the test-only forced hang — TWO keys, both required: the
+    // `inject_gpu_hang` force key AND the `BOYKO_GPU_HANG_OPT_IN` value, because a forced device
+    // loss resets the display driver; `arm_gpu_hang` itself refuses unless breadcrumbs armed.
+    if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN
+        && app
+            .world()
+            .try_resource::<crate::test_force::TestForce>()
+            .is_some_and(|f| f.contains(crate::test_force::TestForceKey::InjectGpuHang))
+        && crate::gpu_crash::gpu_hang_opted_in()
+    {
+        let _armed = host.renderer.arm_gpu_hang(crate::test_force::INJECT_GPU_HANG_FRAME);
+    }
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
     // bounds this loop to `n` iterations, then exits cleanly. Without it an
@@ -1503,6 +1535,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             Ok(t) => t,
             Err(e) => {
                 crate::diag::report_terminal_device_error("frame fence wait", &e);
+                if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN {
+                    crate::diag::report_gpu_crash_if_device_lost("frame fence wait", &host.renderer, ctx, &e);
+                }
                 return;
             }
         };
@@ -3231,6 +3266,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // failure (`frame_driver` contract) — exit and tear down.
             Err(e) => {
                 crate::diag::report_terminal_device_error("render", &e);
+                if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN {
+                    crate::diag::report_gpu_crash_if_device_lost("render", &host.renderer, ctx, &e);
+                }
                 return;
             }
         }

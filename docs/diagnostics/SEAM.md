@@ -856,9 +856,21 @@ The `off` row's 0 is covered where it belongs — logging's `LANE_ARRAY_LEN` is
 `if GLOBAL_CEILING == Off { 0 } else { LANE_COUNT }`, an array length in the consuming crate, not
 a change to the topology.
 
+> **A third consumer, render rung GB (2026-10-27).** The axis is no longer "for both subsystems"
+> alone: `GPU_CRASH_DIAG_CEILING` (`boyko_diag::profile`) is the highest GPU crash-diagnostics level
+> a run may arm (`0 = off, 1 = fault, 2 = labels, 3 = markers, 4 = checkpoints`, the numbering of
+> `boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel`). Rows: `dev` 4 · `editor` 4 · `shipping` 0 ·
+> `shipping-min` 0 · `off` 0; `custom` takes `BOYKO_GPU_CRASH_DIAG_MAX`. A `0` is a `const false`
+> at the head of every GB site's gate, so the sites, their cold bodies and the extension entry-point
+> names are absent from the image — `boyko_app/tests/gpu_crash_shipping_census.rs` byte-scans a
+> `shipping` and a `dev` build of the `clear` example for those names and for a literal only a
+> GB per-frame cold body references (the names alone fold through the level clamp even when a
+> site does not), and two `const` assertions in `boyko_rhi_vulkan/src/gpu_crash.rs` pin
+> `COMPILED_IN` to the axis in every profile's build, `profile-legs` included.
+
 - **`BOYKO_PROFILING_TIER` / `BOYKO_PROFILING_REGION_CAPACITY` / `BOYKO_PROFILING_DYN_CAP` /
-  `BOYKO_LOG_MAX_LEVEL` survive ONLY under `BOYKO_PROFILE=custom`.** Setting one beside a named
-  profile is a **`compile_error!`** naming the conflict.
+  `BOYKO_LOG_MAX_LEVEL` / `BOYKO_GPU_CRASH_DIAG_MAX` survive ONLY under `BOYKO_PROFILE=custom`.**
+  Setting one beside a named profile is a **`compile_error!`** naming the conflict.
 - **The default is a default, not a coupling.** A `shipping` build may select
   `LogRuntimePreset::Dev` at run time, which is why the header prints **three independent facts** —
   `build_profile=… runtime_preset=… ceiling=…` — and not one profile name. The 128-bit

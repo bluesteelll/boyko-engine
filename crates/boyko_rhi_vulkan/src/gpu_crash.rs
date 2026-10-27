@@ -1,0 +1,473 @@
+//! Render rung GB — GPU crash diagnostics: the arming level, its compile-time ceiling, and the
+//! optional extension command tables a booted [`VulkanContext`](crate::device::VulkanContext)
+//! carries.
+//!
+//! # Three pieces under one cumulative level
+//!
+//! | level | adds | what it costs a frame |
+//! |---|---|---|
+//! | [`GpuCrashDiagLevel::Off`] | nothing — no extension, no command | nothing |
+//! | [`GpuCrashDiagLevel::Fault`] | `VK_EXT_device_fault` (read only after a device loss) | nothing |
+//! | [`GpuCrashDiagLevel::Labels`] | `VK_EXT_debug_utils` pass labels + resource names | one label pair per scope |
+//! | [`GpuCrashDiagLevel::Markers`] | `VK_AMD_buffer_marker` begin/end breadcrumbs | two marker writes per scope |
+//! | [`GpuCrashDiagLevel::Checkpoints`] | `VK_NV_device_diagnostic_checkpoints` | two checkpoints per scope |
+//!
+//! Each piece is armed only when it is requested **and** the device advertises it: a missing
+//! extension drops that piece and reports `boyko-W2107`, never a boot failure. The level is read
+//! once, at boot (extensions are boot-frozen), from the `boyko_app::GpuCrashDiag` resource or the
+//! `BOYKO_GPU_CRASH_DIAG` dev seam.
+//!
+//! # The ceiling deletes the sites
+//!
+//! [`GpuCrashDiagLevel::CEILING`] is the build profile's `GPU_CRASH_DIAG_CEILING`
+//! (`boyko_diag::profile`). Every GB site in this crate is gated
+//! `GpuCrashDiagLevel::COMPILED_IN && <armed byte>`; in a `shipping` build the first conjunct is a
+//! `const false`, so the site, its `#[cold]` body and the entry-point names it would load are not
+//! in the image. A runtime level above the ceiling is clamped, never refused. Two `const`
+//! assertions pin `COMPILED_IN` to the axis in every profile's build, and
+//! `boyko_app/tests/gpu_crash_shipping_census.rs` checks the linked images.
+//!
+//! # Where the pieces live
+//!
+//! The per-scope recording (the chained scope, the marker region, the per-frame verification)
+//! is `present::gpu_crumbs`. This module holds only the boot-time decision and the loaded entry
+//! points, so a context booted for a headless test carries the same answer as the windowed one.
+
+use crate::ffi::{
+    PfnVkCmdBeginDebugUtilsLabelExt, PfnVkCmdEndDebugUtilsLabelExt, PfnVkCmdSetCheckpointNv,
+    PfnVkCmdWriteBufferMarkerAmd, PfnVkGetDeviceFaultInfoExt, PfnVkGetQueueCheckpointDataNv,
+    PfnVkSetDebugUtilsObjectNameExt,
+};
+
+/// The GPU crash-diagnostics arming level. Cumulative: each level includes every piece below it.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+pub enum GpuCrashDiagLevel {
+    /// Nothing is enabled and nothing is recorded — byte-identical to a build without GB.
+    #[default]
+    Off = 0,
+    /// `VK_EXT_device_fault` is enabled, so a device loss can name the faulting address.
+    Fault = 1,
+    /// Adds debug-utils labels: every graph pass and host scope runs inside a label named after
+    /// the pass, and graph resources carry their declared names (RenderDoc / Nsight captures).
+    Labels = 2,
+    /// Adds breadcrumbs: each scope writes a begin and an end marker (`vkCmdWriteBufferMarkerAMD`),
+    /// so a device loss names the last completed scope and the scopes in flight.
+    Markers = 3,
+    /// Adds NVIDIA per-stage checkpoints at the same scope points.
+    Checkpoints = 4,
+}
+
+/// The piece bits a booted context carries after the device probe (`requested ∧ supported`).
+pub mod piece {
+    /// `VK_EXT_device_fault` is enabled.
+    pub const FAULT: u8 = 1 << 0;
+    /// `VK_EXT_debug_utils` labels and object names are live.
+    pub const LABELS: u8 = 1 << 1;
+    /// `VK_AMD_buffer_marker` breadcrumbs are live.
+    pub const MARKERS: u8 = 1 << 2;
+    /// `VK_NV_device_diagnostic_checkpoints` checkpoints are live.
+    pub const CHECKPOINTS: u8 = 1 << 3;
+    /// Every piece a frame records (everything but the fault query).
+    pub const PER_FRAME: u8 = LABELS | MARKERS | CHECKPOINTS;
+    /// The pieces in bit order with their report spelling.
+    pub const NAMES: [(u8, &str); 4] =
+        [(FAULT, "fault"), (LABELS, "labels"), (MARKERS, "markers"), (CHECKPOINTS, "checkpoints")];
+}
+
+impl GpuCrashDiagLevel {
+    /// Every level, lowest first; a level's index is its discriminant.
+    pub const ALL: [Self; 5] = [Self::Off, Self::Fault, Self::Labels, Self::Markers, Self::Checkpoints];
+
+    /// The highest level this build admits — the profile axis's `GPU_CRASH_DIAG_CEILING`.
+    /// `from_raw` panics outside `0..=4`, and a panic in a `const` initialiser is a compile
+    /// error, so a build script that emitted a nonsense ceiling fails the build.
+    pub const CEILING: Self = Self::from_raw(boyko_diag::profile::GPU_CRASH_DIAG_CEILING);
+
+    /// `true` iff this build compiles any GB site in. The FIRST conjunct of every site's gate:
+    /// `false` in a `shipping` build, where it deletes the site and its cold body.
+    pub const COMPILED_IN: bool = Self::CEILING as u8 != 0;
+
+    /// The level whose discriminant is `raw`.
+    ///
+    /// # Panics
+    ///
+    /// When `raw > 4` (a compile error when evaluated in a `const`).
+    #[inline]
+    pub const fn from_raw(raw: u8) -> Self {
+        match raw {
+            0 => Self::Off,
+            1 => Self::Fault,
+            2 => Self::Labels,
+            3 => Self::Markers,
+            4 => Self::Checkpoints,
+            _ => panic!("invariant: a GPU crash-diagnostics level is in 0..=4"),
+        }
+    }
+
+    /// `self`, lowered to `ceiling` when it is above it. Pure; the ceiling is a parameter so the
+    /// clamp is testable in a `dev` build, where [`Self::CEILING`] admits everything.
+    #[inline]
+    pub const fn clamped_to(self, ceiling: Self) -> Self {
+        if self as u8 > ceiling as u8 { ceiling } else { self }
+    }
+
+    /// `self` under this build's [`Self::CEILING`] — the level a boot actually arms.
+    #[inline]
+    pub const fn effective(self) -> Self {
+        self.clamped_to(Self::CEILING)
+    }
+
+    /// The piece bits this level requests (before the device probe drops unsupported ones).
+    #[inline]
+    pub const fn requested_pieces(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Fault => piece::FAULT,
+            Self::Labels => piece::FAULT | piece::LABELS,
+            Self::Markers => piece::FAULT | piece::LABELS | piece::MARKERS,
+            Self::Checkpoints => piece::FAULT | piece::LABELS | piece::MARKERS | piece::CHECKPOINTS,
+        }
+    }
+
+    /// The `BOYKO_GPU_CRASH_DIAG` spelling of this level.
+    #[inline]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Fault => "fault",
+            Self::Labels => "labels",
+            Self::Markers => "markers",
+            Self::Checkpoints => "checkpoints",
+        }
+    }
+
+    /// Parses a `BOYKO_GPU_CRASH_DIAG` value (ASCII case-insensitive, surrounding whitespace
+    /// ignored). `None` for anything that is not one of the five names. Allocates nothing.
+    pub fn parse(value: &str) -> Option<Self> {
+        let v = value.trim();
+        Self::ALL.into_iter().find(|l| l.name().eq_ignore_ascii_case(v))
+    }
+}
+
+/// The named profiles whose builds must compile every GB site out (`boyko_diag::profile`'s
+/// `player_profiles_compile_the_gpu_crash_diagnostics_out` names the same three).
+const GB_FREE_PROFILES: [&str; 3] = ["shipping", "shipping-min", "off"];
+
+/// `true` iff `name` is one of [`GB_FREE_PROFILES`]. `const` because `str::eq` is not.
+const fn is_gb_free_profile(name: &str) -> bool {
+    let n = name.as_bytes();
+    let mut i = 0;
+    while i < GB_FREE_PROFILES.len() {
+        let p = GB_FREE_PROFILES[i].as_bytes();
+        if p.len() == n.len() {
+            let mut j = 0;
+            while j < p.len() && p[j] == n[j] {
+                j += 1;
+            }
+            if j == p.len() {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+// The ceiling's deletion holds in the build that ships, not only in the one the tests run in
+// (GB review r1 F3). `the_ceiling_is_the_profile_axis_value` is a runtime test, evaluated only in
+// the profile the tests are built under (`dev`); these are compile-time, so CI's `profile-legs`
+// `cargo check` under each named profile, and the shipping census's nested `shipping` build,
+// evaluate them. A `COMPILED_IN` forced `true`, a ceiling read from anywhere but the axis, or a
+// `shipping` row that admits a level fails the shipping build here. G1 holds every site to
+// `COMPILED_IN && <armed byte>`; these hold `COMPILED_IN` itself.
+const _: () = assert!(
+    GpuCrashDiagLevel::COMPILED_IN == (boyko_diag::profile::GPU_CRASH_DIAG_CEILING != 0),
+    "invariant: GB is compiled in iff the profile axis's GPU_CRASH_DIAG_CEILING is above 0"
+);
+const _: () = assert!(
+    !GpuCrashDiagLevel::COMPILED_IN || !is_gb_free_profile(boyko_diag::profile::PROFILE_NAME),
+    "invariant: a shipping, shipping-min or off build compiles every GB site out"
+);
+
+/// `VK_EXT_debug_utils` command-buffer label and object-name entry points, loaded through
+/// `vkGetInstanceProcAddr` (the loader trampolines) when [`piece::LABELS`] is armed.
+#[derive(Clone, Copy)]
+pub struct DebugUtilsCmdFns {
+    /// `vkCmdBeginDebugUtilsLabelEXT`.
+    pub begin_label: PfnVkCmdBeginDebugUtilsLabelExt,
+    /// `vkCmdEndDebugUtilsLabelEXT`.
+    pub end_label: PfnVkCmdEndDebugUtilsLabelExt,
+    /// `vkSetDebugUtilsObjectNameEXT`.
+    pub set_object_name: PfnVkSetDebugUtilsObjectNameExt,
+}
+
+/// The `VK_AMD_buffer_marker` entry point, loaded through `vkGetDeviceProcAddr` when
+/// [`piece::MARKERS`] is armed.
+#[derive(Clone, Copy)]
+pub struct MarkerFns {
+    /// `vkCmdWriteBufferMarkerAMD` (sync1).
+    pub write_buffer_marker: PfnVkCmdWriteBufferMarkerAmd,
+}
+
+/// The `VK_NV_device_diagnostic_checkpoints` entry points, loaded through `vkGetDeviceProcAddr`
+/// when [`piece::CHECKPOINTS`] is armed.
+#[derive(Clone, Copy)]
+pub struct CheckpointFns {
+    /// `vkCmdSetCheckpointNV`.
+    pub set_checkpoint: PfnVkCmdSetCheckpointNv,
+    /// `vkGetQueueCheckpointDataNV` (sync1; legal only on a lost device).
+    pub get_queue_checkpoint_data: PfnVkGetQueueCheckpointDataNv,
+}
+
+/// The `VK_EXT_device_fault` entry point, loaded through `vkGetDeviceProcAddr` when
+/// [`piece::FAULT`] is armed.
+#[derive(Clone, Copy)]
+pub struct FaultFns {
+    /// `vkGetDeviceFaultInfoEXT` (legal only on a lost device).
+    pub get_device_fault_info: PfnVkGetDeviceFaultInfoExt,
+    /// `deviceFaultVendorBinary` was enabled: the query may return the vendor's binary dump.
+    pub vendor_binary: bool,
+}
+
+/// What a boot armed: the clamped level, the piece bits that survived the probe, and the loaded
+/// entry points. `Copy` POD, read once by each consumer at its own construction.
+#[derive(Clone, Copy, Default)]
+pub struct GpuCrashState {
+    /// The level the boot asked for, after the build's ceiling clamp.
+    pub level: GpuCrashDiagLevel,
+    /// The armed pieces ([`piece`] bits): requested by `level` and supported by the device.
+    pub pieces: u8,
+    /// `Some` iff [`piece::LABELS`] is armed.
+    pub debug_utils: Option<DebugUtilsCmdFns>,
+    /// `Some` iff [`piece::MARKERS`] is armed.
+    pub markers: Option<MarkerFns>,
+    /// `Some` iff [`piece::CHECKPOINTS`] is armed.
+    pub checkpoints: Option<CheckpointFns>,
+    /// `Some` iff [`piece::FAULT`] is armed.
+    pub fault: Option<FaultFns>,
+}
+
+impl GpuCrashState {
+    /// The state of a context booted with GB off: no piece, no entry point.
+    pub const OFF: Self = Self {
+        level: GpuCrashDiagLevel::Off,
+        pieces: 0,
+        debug_utils: None,
+        markers: None,
+        checkpoints: None,
+        fault: None,
+    };
+
+    /// `true` iff piece `bit` is armed.
+    #[inline]
+    pub const fn has(&self, bit: u8) -> bool {
+        self.pieces & bit != 0
+    }
+}
+
+/// The decoded `VkDeviceFaultVendorBinaryHeaderVersionOneEXT` at the start of a vendor binary.
+///
+/// Decoded byte by byte with `from_le_bytes` (the binary is a byte buffer with alignment 1, so a
+/// reference to the C struct in place would be misaligned), Vulkan being little-endian on every
+/// platform this engine targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VendorBinaryHeader {
+    /// `headerSize` (56 for version one).
+    pub header_size: u32,
+    /// `headerVersion` (1).
+    pub header_version: u32,
+    /// `vendorID` (PCI).
+    pub vendor_id: u32,
+    /// `deviceID` (PCI).
+    pub device_id: u32,
+    /// `driverVersion`, vendor-encoded.
+    pub driver_version: u32,
+    /// `pipelineCacheUUID`.
+    pub pipeline_cache_uuid: [u8; 16],
+    /// `apiVersion`.
+    pub api_version: u32,
+}
+
+impl VendorBinaryHeader {
+    /// The version-one header's size in bytes.
+    pub const SIZE: usize = 56;
+
+    /// Decodes the header at the start of `bytes`; `None` if fewer than [`Self::SIZE`] bytes or a
+    /// `headerVersion` other than 1.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let head = bytes.get(..Self::SIZE)?;
+        let word = |at: usize| u32::from_le_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&head[20..36]);
+        let header = Self {
+            header_size: word(0),
+            header_version: word(4),
+            vendor_id: word(8),
+            device_id: word(12),
+            driver_version: word(16),
+            pipeline_cache_uuid: uuid,
+            api_version: word(52),
+        };
+        (header.header_version == 1).then_some(header)
+    }
+}
+
+/// What the renderer's per-frame breadcrumb verification counted since boot (render rung GB, gate
+/// G2). Every field is `0` in an unarmed run. A frame is checked after its slot's fence wait.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CrumbLedger {
+    /// Frames verified.
+    pub frames_checked: u64,
+    /// Verified frames whose breadcrumbs were not all complete (markers piece only): a frame
+    /// begin or end, or a scope's begin or end, did not carry the frame's serial.
+    pub frames_incomplete: u64,
+    /// Verified frames whose graph-pass scopes did not equal the passes the graph declared.
+    pub parity_mismatch: u64,
+    /// Scopes (record positions) verified, overflow included.
+    pub scopes_checked: u64,
+    /// Label regions opened / closed by the verified frames (labels piece).
+    pub labels_begun: u64,
+    pub labels_ended: u64,
+    /// Record positions past the breadcrumb cap (labelled, not marked).
+    pub overflow: u64,
+    /// A slot verified a serial that was not newer than the one it verified before.
+    pub serial_regressions: u64,
+    /// The newest serial verified (`0`: none).
+    pub last_serial: u32,
+}
+
+/// Writes the armed pieces as a comma-separated list (`fault,labels,…`), or `none`.
+pub fn write_pieces<W: core::fmt::Write>(out: &mut W, pieces: u8) -> core::fmt::Result {
+    let mut first = true;
+    for (bit, name) in piece::NAMES {
+        if pieces & bit != 0 {
+            if !first {
+                out.write_str(",")?;
+            }
+            out.write_str(name)?;
+            first = false;
+        }
+    }
+    if first {
+        out.write_str("none")?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GpuCrashDiagLevel, piece, write_pieces};
+
+    /// The shipping clamp: under a zero ceiling every level is `Off`, so nothing is enabled.
+    ///
+    /// RED: make `clamped_to` return `self` unconditionally and `Labels` survives ceiling 0.
+    #[test]
+    fn ceiling_zero_clamps_every_level_to_off() {
+        for level in GpuCrashDiagLevel::ALL {
+            assert_eq!(
+                level.clamped_to(GpuCrashDiagLevel::Off),
+                GpuCrashDiagLevel::Off,
+                "{level:?} survived a zero ceiling"
+            );
+            assert_eq!(level.clamped_to(GpuCrashDiagLevel::Off).requested_pieces(), 0);
+        }
+        assert_eq!(
+            GpuCrashDiagLevel::Checkpoints.clamped_to(GpuCrashDiagLevel::Labels),
+            GpuCrashDiagLevel::Labels,
+            "a level above the ceiling is lowered to it, not refused"
+        );
+        assert_eq!(GpuCrashDiagLevel::Fault.clamped_to(GpuCrashDiagLevel::Labels), GpuCrashDiagLevel::Fault);
+    }
+
+    /// The ceiling constant agrees with the profile axis it is read from.
+    #[test]
+    fn the_ceiling_is_the_profile_axis_value() {
+        assert_eq!(GpuCrashDiagLevel::CEILING as u8, boyko_diag::profile::GPU_CRASH_DIAG_CEILING);
+        assert_eq!(GpuCrashDiagLevel::COMPILED_IN, GpuCrashDiagLevel::CEILING != GpuCrashDiagLevel::Off);
+    }
+
+    /// The `const` profile-name match behind the shipping-leg assertion: exact names only.
+    ///
+    /// RED: compare only the first `p.len()` bytes and `shipping-min` with a suffix matches.
+    #[test]
+    fn the_gb_free_profiles_match_by_exact_name() {
+        for name in ["shipping", "shipping-min", "off"] {
+            assert!(super::is_gb_free_profile(name), "{name}");
+        }
+        for name in ["dev", "editor", "custom", "", "ship", "shipping-minimal", "offline", "Shipping"] {
+            assert!(!super::is_gb_free_profile(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_level_parses_from_its_name_and_back() {
+        for (i, level) in GpuCrashDiagLevel::ALL.into_iter().enumerate() {
+            assert_eq!(level as usize, i, "a level's index is its discriminant");
+            assert_eq!(GpuCrashDiagLevel::from_raw(i as u8), level);
+            assert_eq!(GpuCrashDiagLevel::parse(level.name()), Some(level));
+            assert_eq!(GpuCrashDiagLevel::parse(&format!(" {} ", level.name().to_uppercase())), Some(level));
+        }
+        assert_eq!(GpuCrashDiagLevel::parse("marker"), None);
+        assert_eq!(GpuCrashDiagLevel::parse(""), None);
+    }
+
+    /// The levels are cumulative: each one's pieces are a strict superset of the one below.
+    #[test]
+    fn levels_are_ordered_and_cumulative() {
+        for pair in GpuCrashDiagLevel::ALL.windows(2) {
+            let (lo, hi) = (pair[0], pair[1]);
+            assert!(lo < hi);
+            let (a, b) = (lo.requested_pieces(), hi.requested_pieces());
+            assert_eq!(a & b, a, "{hi:?} drops a piece {lo:?} had");
+            assert_ne!(a, b, "{hi:?} adds no piece over {lo:?}");
+        }
+        assert_eq!(GpuCrashDiagLevel::Checkpoints.requested_pieces(), piece::FAULT | piece::PER_FRAME);
+    }
+
+    /// The vendor-binary header decodes from an unaligned byte buffer (critique M6: no reference
+    /// into the bytes), and a wrong version or a short buffer is refused.
+    #[test]
+    fn the_vendor_binary_header_decodes_from_bytes() {
+        let mut bytes = vec![0u8; 1 + super::VendorBinaryHeader::SIZE + 8];
+        let at = 1; // deliberately misaligned for every 4-byte field
+        let put = |b: &mut Vec<u8>, off: usize, v: u32| b[at + off..at + off + 4].copy_from_slice(&v.to_le_bytes());
+        put(&mut bytes, 0, 56);
+        put(&mut bytes, 4, 1);
+        put(&mut bytes, 8, 0x10de);
+        put(&mut bytes, 12, 0x2c02);
+        put(&mut bytes, 16, 0x9988_7766);
+        for i in 0..16 {
+            bytes[at + 20 + i] = i as u8;
+        }
+        put(&mut bytes, 52, 0x0040_4155);
+        let h = super::VendorBinaryHeader::decode(&bytes[at..]).expect("a version-one header");
+        assert_eq!((h.header_size, h.header_version, h.vendor_id, h.device_id), (56, 1, 0x10de, 0x2c02));
+        assert_eq!(h.driver_version, 0x9988_7766);
+        assert_eq!(h.pipeline_cache_uuid[15], 15);
+        assert_eq!(h.api_version, 0x0040_4155);
+        assert_eq!(super::VendorBinaryHeader::decode(&bytes[at..at + 55]), None, "short");
+        put(&mut bytes, 4, 2);
+        assert_eq!(super::VendorBinaryHeader::decode(&bytes[at..]), None, "version two is not version one");
+    }
+
+    /// A device loss prints by name, not as `VkResult(-4)` (the `E3003` line carries it).
+    ///
+    /// RED: drop the `ERROR_DEVICE_LOST` arm from `VkResult`'s `Debug` and this reads
+    /// `VkResult(-4)`.
+    #[test]
+    fn a_device_loss_prints_by_name() {
+        assert_eq!(format!("{:?}", crate::ffi::VkResult(-4)), "VK_ERROR_DEVICE_LOST");
+        assert_eq!(crate::ffi::VkResult::ERROR_DEVICE_LOST, crate::ffi::VkResult(-4));
+    }
+
+    #[test]
+    fn pieces_print_in_bit_order() {
+        let mut s = String::new();
+        write_pieces(&mut s, piece::CHECKPOINTS | piece::FAULT | piece::LABELS).expect("String write");
+        assert_eq!(s, "fault,labels,checkpoints");
+        s.clear();
+        write_pieces(&mut s, 0).expect("String write");
+        assert_eq!(s, "none");
+    }
+}

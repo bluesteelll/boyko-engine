@@ -34,10 +34,13 @@ use core::mem;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
-use boyko_log::codes::{E2101, OnceSite, W2102};
+use boyko_log::codes::{E2101, OnceSite, W2102, W2107};
 
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
+use crate::gpu_crash::{
+    CheckpointFns, DebugUtilsCmdFns, FaultFns, GpuCrashDiagLevel, GpuCrashState, MarkerFns, piece,
+};
 use crate::memory::{BlockPool, DeviceLocalBlock, HostVisibleBlock};
 use crate::pipeline_cache::{
     self, CacheLoad, CacheSave, DeviceIdentity, PipelineCachePolicy, PipelineCacheStore,
@@ -830,6 +833,11 @@ pub struct VulkanContext {
     /// The creation-feedback counters, updated after every create on the owning thread. A `Cell`
     /// of a `Copy` POD: the context is already `!Sync`.
     pipeline_stats: Cell<PipelineCreationStats>,
+    /// Render rung GB: what the boot armed for GPU crash diagnostics — the clamped level, the
+    /// pieces that survived the device probe and their entry points. [`GpuCrashState::OFF`] for
+    /// every boot that did not ask (`boot`, `boot_singleton`), and in every `shipping` build.
+    /// Immutable after boot; read through [`Self::gpu_crash`].
+    gpu_crash: GpuCrashState,
 }
 
 /// The retained OWNING pointer behind [`VulkanContext::boot_singleton`] /
@@ -857,14 +865,23 @@ impl VulkanContext {
     ///
     /// If `BOYKO_PIPELINE_CACHE` holds anything but `on` or `off`.
     pub fn boot(config: InstanceConfig) -> Result<Self, BootError> {
-        Self::boot_with_policy(config, PipelineCachePolicy::Ephemeral)
+        Self::boot_with_policy(config, PipelineCachePolicy::Ephemeral, GpuCrashDiagLevel::Off)
     }
 
-    /// The one boot body behind [`Self::boot`] and [`Self::boot_singleton`]. The
-    /// `BOYKO_PIPELINE_CACHE` switch is read here, once per boot and before anything is created,
-    /// so a bad value panics without leaking a device.
-    fn boot_with_policy(config: InstanceConfig, policy: PipelineCachePolicy) -> Result<Self, BootError> {
+    /// The one boot body behind [`Self::boot`], [`Self::boot_singleton`] and
+    /// [`Self::boot_singleton_with_diag`]. The `BOYKO_PIPELINE_CACHE` switch is read here, once per
+    /// boot and before anything is created, so a bad value panics without leaking a device.
+    ///
+    /// `gpu_crash` is the requested GPU crash-diagnostics level (render rung GB); it is clamped to
+    /// the build's ceiling here, once, before the instance exists, so every later read sees the
+    /// level this build can actually arm.
+    fn boot_with_policy(
+        config: InstanceConfig,
+        policy: PipelineCachePolicy,
+        gpu_crash: GpuCrashDiagLevel,
+    ) -> Result<Self, BootError> {
         let policy = policy.with_switch(pipeline_cache::switch_from_env());
+        let gpu_crash = gpu_crash.effective();
         // --- 0. Validation escape hatch. ---
         // Normalize `enable_validation` to its EFFECTIVE value ONCE, at the single
         // entry point, before `config` (passed BY VALUE / `Copy`) flows into
@@ -937,13 +954,20 @@ impl VulkanContext {
         };
 
         // --- 3. Create the instance (optional validation layer). ---
-        let instance = match create_instance(&global, get_instance_proc_addr, config) {
-            Ok(i) => i,
-            Err(e) => {
-                unsafe { free_vulkan_loader(module) };
-                return Err(e);
-            }
-        };
+        // Render rung GB: `VK_EXT_debug_utils` is also wanted for pass labels when the level
+        // reaches `Labels` — the `COMPILED_IN` conjunct folds the whole request away in a build
+        // whose ceiling is `Off`.
+        let want_labels = GpuCrashDiagLevel::COMPILED_IN && gpu_crash >= GpuCrashDiagLevel::Labels;
+        let (instance, labels_enabled) =
+            match create_instance(&global, get_instance_proc_addr, config, want_labels) {
+                Ok(i) => i,
+                Err(e) => {
+                    // SAFETY: `module` is the live HMODULE loaded above; this early-out path frees
+                    // it exactly once, before it is stored anywhere.
+                    unsafe { free_vulkan_loader(module) };
+                    return Err(e);
+                }
+            };
 
         // From here on, `instance` must be destroyed on every error path. A
         // small RAII-on-error helper keeps the early returns honest.
@@ -953,6 +977,7 @@ impl VulkanContext {
             get_instance_proc_addr,
             config,
             policy,
+            GpuCrashBoot { level: gpu_crash, labels_enabled, device: GpuCrashDevice::default() },
         );
         match result {
             Ok(ctx) => Ok(ctx),
@@ -1003,6 +1028,28 @@ impl VulkanContext {
         config: InstanceConfig,
         cache: PipelineCachePolicy,
     ) -> Result<&'static VulkanContext, crate::error::VulkanError> {
+        Self::boot_singleton_with_diag(config, cache, GpuCrashDiagLevel::Off)
+    }
+
+    /// [`Self::boot_singleton`] with a GPU crash-diagnostics level (render rung GB).
+    ///
+    /// `gpu_crash` is clamped to this build's [`GpuCrashDiagLevel::CEILING`]; each piece it asks
+    /// for is enabled only when the device advertises it, and a missing one reports
+    /// `boyko-W2107` rather than failing the boot. What was armed is
+    /// [`gpu_crash`](Self::gpu_crash). [`GpuCrashDiagLevel::Off`] is exactly
+    /// [`Self::boot_singleton`]: no extension, no entry point.
+    ///
+    /// The level is a parameter rather than an [`InstanceConfig`] field because that struct is
+    /// built by literal at 62 sites, 16 of them without `..InstanceConfig::default()`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::boot_singleton`].
+    pub fn boot_singleton_with_diag(
+        config: InstanceConfig,
+        cache: PipelineCachePolicy,
+        gpu_crash: GpuCrashDiagLevel,
+    ) -> Result<&'static VulkanContext, crate::error::VulkanError> {
         // Advisory fast-fail so a contract-violating second boot does not
         // create (and immediately destroy) a whole second device. The
         // compare_exchange below remains the authority.
@@ -1011,7 +1058,7 @@ impl VulkanContext {
             return Err(crate::error::VulkanError::SingletonAlreadyBooted);
         }
 
-        let ctx = Self::boot_with_policy(config, cache)?;
+        let ctx = Self::boot_with_policy(config, cache, gpu_crash)?;
         let raw = Box::into_raw(Box::new(ctx));
 
         // Publish the owning pointer. Release on success: whoever observes
@@ -1129,6 +1176,7 @@ impl VulkanContext {
         gipa: PfnVkGetInstanceProcAddr,
         config: InstanceConfig,
         policy: PipelineCachePolicy,
+        gpu_crash_boot: GpuCrashBoot,
     ) -> Result<Self, (BootError, InstanceFns)> {
         let instance_fns = match load_instance_fns(gipa, instance, config) {
             Ok(f) => f,
@@ -1296,6 +1344,20 @@ impl VulkanContext {
         device_caps.calibrated_timestamps =
             supports_calibrated_timestamps(gipa, instance, physical_device);
 
+        // Render rung GB: the device half of the requested GPU crash-diagnostics pieces, on the
+        // same "query before request" precedent — an unadvertised extension string is a hard
+        // `vkCreateDevice` failure, so each piece is enabled only after its probe said yes, and a
+        // missing one reports `boyko-W2107` instead. `COMPILED_IN` folds the probe away in a
+        // `shipping` build.
+        let gpu_crash_device = if GpuCrashDiagLevel::COMPILED_IN
+            && gpu_crash_boot.level.requested_pieces() & (piece::FAULT | piece::MARKERS | piece::CHECKPOINTS) != 0
+        {
+            probe_gpu_crash_device(&instance_fns, gipa, instance, physical_device, gpu_crash_boot.level)
+        } else {
+            GpuCrashDevice::default()
+        };
+        let gpu_crash_boot = GpuCrashBoot { device: gpu_crash_device, ..gpu_crash_boot };
+
         // --- 6. Create the logical device + retrieve the queue. ---
         let device = match create_device(
             &instance_fns,
@@ -1307,6 +1369,10 @@ impl VulkanContext {
                 enable_vb_geometry_table,
                 enable_host_query_reset: device_caps.host_query_reset,
                 enable_calibrated_timestamps: device_caps.calibrated_timestamps,
+                enable_buffer_marker: gpu_crash_boot.device.buffer_marker,
+                enable_checkpoints: gpu_crash_boot.device.checkpoints,
+                enable_device_fault: gpu_crash_boot.device.fault,
+                enable_device_fault_vendor_binary: gpu_crash_boot.device.fault_vendor_binary,
             },
         ) {
             Ok(d) => d,
@@ -1334,6 +1400,15 @@ impl VulkanContext {
         // name the single queue requested in `create_device`; `&mut queue` is
         // a valid out-pointer for one `VkQueue`.
         unsafe { (device_fns.get_device_queue)(device, queue_family_index, 0, &mut queue) };
+
+        // Render rung GB: resolve the entry points of every piece the instance and the device
+        // armed. A shipping build's `COMPILED_IN` is `false`, which makes this `OFF` and deletes
+        // the loads with their entry-point names.
+        let gpu_crash = if GpuCrashDiagLevel::COMPILED_IN && gpu_crash_boot.level != GpuCrashDiagLevel::Off {
+            arm_gpu_crash(gipa, instance, instance_fns.get_device_proc_addr, device, gpu_crash_boot)
+        } else {
+            GpuCrashState::OFF
+        };
 
         // BOOT-1 F-A: the context's one pipeline cache, keyed by the identity the Vulkan cache
         // header itself carries (vendor, device, `pipelineCacheUUID`) plus the driver version —
@@ -1412,6 +1487,7 @@ impl VulkanContext {
             pipeline_cache_guard: Cell::new(pipeline_cache_guard),
             pipeline_cache_load,
             pipeline_stats: Cell::new(PipelineCreationStats::default()),
+            gpu_crash,
         })
     }
 
@@ -1709,6 +1785,14 @@ impl VulkanContext {
     #[inline]
     pub fn validation_enabled(&self) -> bool {
         self.debug_state.is_some()
+    }
+
+    /// Render rung GB: what this boot armed for GPU crash diagnostics — the clamped level, the
+    /// armed [`piece`] bits and their entry points. [`GpuCrashState::OFF`] unless the context was
+    /// booted through [`Self::boot_singleton_with_diag`] with a level above `Off`.
+    #[inline]
+    pub fn gpu_crash(&self) -> &GpuCrashState {
+        &self.gpu_crash
     }
 
     /// The shared compute descriptor-set + pipeline layouts, created on first
@@ -2588,11 +2672,53 @@ fn report_sync_validation_absent() {
     }
 }
 
+/// The instance extensions one boot enables, in enable order — a pure function of its inputs so
+/// the GB-off array can be pinned against the pre-GB one without a device.
+///
+/// `VK_EXT_debug_utils` has ONE slot, wanted by validation (the messenger) or by GB's labels:
+/// enabling it twice would be invalid usage, and with both off it is not enabled at all.
+#[derive(Clone, Copy)]
+struct InstanceExtensionInputs {
+    validation: bool,
+    sync_validation: bool,
+    /// Render rung GB: the labels piece is armed and the instance advertises the extension.
+    labels: bool,
+    windowed: bool,
+}
+
+/// debug-utils + validation-features + the two WSI extensions.
+const MAX_INSTANCE_EXTENSIONS: usize = 4;
+
+fn instance_extension_list(i: InstanceExtensionInputs) -> ([&'static CStr; MAX_INSTANCE_EXTENSIONS], usize) {
+    let mut names: [&'static CStr; MAX_INSTANCE_EXTENSIONS] = [c""; MAX_INSTANCE_EXTENSIONS];
+    let mut count = 0usize;
+    if i.validation || i.labels {
+        names[count] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+        count += 1;
+    }
+    if i.sync_validation {
+        names[count] = VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME;
+        count += 1;
+    }
+    if i.windowed {
+        names[count] = VK_KHR_SURFACE_EXTENSION_NAME;
+        count += 1;
+        names[count] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME;
+        count += 1;
+    }
+    (names, count)
+}
+
+/// Creates the instance. Returns it with whether `VK_EXT_debug_utils` is enabled for GB's labels
+/// (render rung GB): `want_labels` asks, and the answer is `true` when validation already enabled
+/// the extension or the instance advertises it. An absent extension drops the labels piece with
+/// `boyko-W2107` — never a boot failure, unlike validation's own requirement on it.
 fn create_instance(
     global: &GlobalFns,
     _gipa: PfnVkGetInstanceProcAddr,
     config: InstanceConfig,
-) -> Result<VkInstance, BootError> {
+    want_labels: bool,
+) -> Result<(VkInstance, bool), BootError> {
     // When validation is requested, BOTH the layer and the `VK_EXT_debug_utils`
     // extension must be present, else the messenger (the oracle) cannot be
     // created — a missing oracle must never be invisible (plan §6). Query
@@ -2653,22 +2779,23 @@ fn create_instance(
         report_sync_validation_absent();
     }
 
-    let mut ext_ptrs: [*const c_char; 4] = [ptr::null(); 4];
-    let mut ext_count: u32 = 0;
-    if config.enable_validation {
-        ext_ptrs[ext_count as usize] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
+    // Render rung GB: with validation on, the extension was verified present above; without it
+    // the labels piece probes for itself, and an enumeration failure reads as "absent" — a
+    // diagnostics piece must never fail a boot.
+    let labels = want_labels
+        && (config.enable_validation || is_debug_utils_extension_present(global).unwrap_or(false));
+    if want_labels && !labels {
+        report_gpu_crash_piece_unavailable(&W2107_LABELS_SITE, "labels", "the instance does not advertise VK_EXT_debug_utils");
     }
-    if sync_validation_available {
-        ext_ptrs[ext_count as usize] = VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-    }
-    if config.windowed {
-        ext_ptrs[ext_count as usize] = VK_KHR_SURFACE_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-        ext_ptrs[ext_count as usize] = VK_KHR_WIN32_SURFACE_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-    }
+
+    let (ext_names, ext_count) = instance_extension_list(InstanceExtensionInputs {
+        validation: config.enable_validation,
+        sync_validation: sync_validation_available,
+        labels,
+        windowed: config.windowed,
+    });
+    let ext_ptrs: [*const c_char; MAX_INSTANCE_EXTENSIONS] = ext_names.map(CStr::as_ptr);
+    let ext_count = ext_count as u32;
     let pp_exts: *const *const c_char = if ext_count == 0 {
         ptr::null()
     } else {
@@ -2754,7 +2881,7 @@ fn create_instance(
     if !result.is_success() {
         return Err(BootError::VkError("vkCreateInstance", result));
     }
-    Ok(instance)
+    Ok((instance, labels))
 }
 
 /// Whether `VK_LAYER_KHRONOS_validation` is installed (queried via the global
@@ -3876,6 +4003,240 @@ fn report_ssao_denoise_storage_unsupported() {
     }
 }
 
+// ── `boyko-W2107` — a requested GPU crash-diagnostics piece is unavailable (render rung GB) ─────
+//
+// One reporter, four latches, for `W2102`'s F11 reason: each piece (labels, markers, checkpoints,
+// the fault query) degrades independently, and a code-scoped `Once` would report the first and
+// lose the rest. The latch is the CALLER's, so a test can reset each one.
+
+/// `boyko-W2107`, site 1 — the labels piece (`VK_EXT_debug_utils`).
+pub(crate) static W2107_LABELS_SITE: OnceSite = OnceSite::new();
+/// `boyko-W2107`, site 2 — the markers piece (`VK_AMD_buffer_marker`, or its buffer).
+pub(crate) static W2107_MARKERS_SITE: OnceSite = OnceSite::new();
+/// `boyko-W2107`, site 3 — the checkpoints piece (`VK_NV_device_diagnostic_checkpoints`).
+pub(crate) static W2107_CHECKPOINTS_SITE: OnceSite = OnceSite::new();
+/// `boyko-W2107`, site 4 — the fault piece (`VK_EXT_device_fault` or its `deviceFault` feature).
+pub(crate) static W2107_FAULT_SITE: OnceSite = OnceSite::new();
+/// `boyko-W2107`, site 5 — the fault piece's vendor binary (`deviceFaultVendorBinary`): the report
+/// still prints the fault's addresses and vendor records, without the binary dump.
+pub(crate) static W2107_FAULT_BINARY_SITE: OnceSite = OnceSite::new();
+
+/// `boyko-W2107` — a GPU crash-diagnostics piece the arming level asked for is unavailable on
+/// this device, so the run continues without it. `site` is the piece's own latch.
+#[cold]
+#[inline(never)]
+pub(crate) fn report_gpu_crash_piece_unavailable(site: &OnceSite, piece_name: &str, why: &str) {
+    if site.claim() {
+        boyko_log::warn!(
+            boyko_log::RhiVulkan,
+            W2107,
+            "the requested GPU crash-diagnostics piece {} is unavailable ({}) - continuing without it",
+            piece_name,
+            why
+        );
+    }
+}
+
+/// The GB decisions the boot carries to `boot_with_instance`'s fn loads (render rung GB).
+#[derive(Clone, Copy)]
+struct GpuCrashBoot {
+    /// The requested level, already clamped to the build ceiling.
+    level: GpuCrashDiagLevel,
+    /// `create_instance` enabled `VK_EXT_debug_utils` for the labels piece.
+    labels_enabled: bool,
+    /// The device extensions the probe found and `create_device` enabled.
+    device: GpuCrashDevice,
+}
+
+/// The GB device extensions a physical device advertises AND the level requested — each `true`
+/// is enabled by `create_device` (render rung GB).
+#[derive(Clone, Copy, Default)]
+struct GpuCrashDevice {
+    /// `VK_AMD_buffer_marker` (the markers piece).
+    buffer_marker: bool,
+    /// `VK_NV_device_diagnostic_checkpoints` (the checkpoints piece).
+    checkpoints: bool,
+    /// `VK_EXT_device_fault` with `deviceFault` (the fault piece).
+    fault: bool,
+    /// ... and `deviceFaultVendorBinary`.
+    fault_vendor_binary: bool,
+}
+
+/// Probes the device extensions of the pieces `level` requests and reports `boyko-W2107` for each
+/// requested piece the device does not advertise. Never fails a boot. Cold: once per armed boot.
+#[cold]
+#[inline(never)]
+fn probe_gpu_crash_device(
+    fns: &InstanceFns,
+    gipa: PfnVkGetInstanceProcAddr,
+    instance: VkInstance,
+    physical_device: VkPhysicalDevice,
+    level: GpuCrashDiagLevel,
+) -> GpuCrashDevice {
+    let wanted = level.requested_pieces();
+    // SAFETY: `gipa` is the live instance's `vkGetInstanceProcAddr`;
+    // `vkEnumerateDeviceExtensionProperties` is Vulkan 1.0 core, so it resolves (a NULL is still
+    // handled), and the non-null pointer is reinterpreted as its ABI-matched PFN typedef — the
+    // `supports_calibrated_timestamps` shape.
+    let enum_ext: Option<crate::ffi::PfnVkEnumerateDeviceExtensionProperties> = unsafe {
+        (gipa)(instance, c"vkEnumerateDeviceExtensionProperties".as_ptr()).map(|f| {
+            mem::transmute::<unsafe extern "system" fn(), crate::ffi::PfnVkEnumerateDeviceExtensionProperties>(f)
+        })
+    };
+    let has = |name: &CStr| enum_ext.is_some_and(|e| is_device_extension_present(e, physical_device, name));
+    let mut found = GpuCrashDevice::default();
+    if wanted & piece::MARKERS != 0 {
+        found.buffer_marker = has(VK_AMD_BUFFER_MARKER_EXTENSION_NAME);
+        if !found.buffer_marker {
+            report_gpu_crash_piece_unavailable(
+                &W2107_MARKERS_SITE,
+                "markers",
+                "the device does not advertise VK_AMD_buffer_marker",
+            );
+        }
+    }
+    if wanted & piece::CHECKPOINTS != 0 {
+        found.checkpoints = has(VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME);
+        if !found.checkpoints {
+            report_gpu_crash_piece_unavailable(
+                &W2107_CHECKPOINTS_SITE,
+                "checkpoints",
+                "the device does not advertise VK_NV_device_diagnostic_checkpoints",
+            );
+        }
+    }
+    if wanted & piece::FAULT != 0 {
+        let present = has(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        let (mut device_fault, mut vendor_binary) = (false, false);
+        if present {
+            let mut features = zeroed_fault_features();
+            let mut features2 = VkPhysicalDeviceFeatures2 {
+                s_type: VkStructureType::PhysicalDeviceFeatures2,
+                p_next: (&mut features as *mut VkPhysicalDeviceFaultFeaturesExt).cast(),
+                features: VkPhysicalDeviceFeatures::default(),
+            };
+            // SAFETY: `physical_device` is a valid enumerated GPU that advertises
+            // `VK_EXT_device_fault`, so the chained struct is one the driver recognises; `features2`
+            // is fully initialised and its `p_next` points at the live `features` local, both
+            // outliving the call; the driver writes the two supported bools through the chain.
+            unsafe { (fns.get_physical_device_features2)(physical_device, &mut features2) };
+            device_fault = features.device_fault == VK_TRUE;
+            vendor_binary = features.device_fault_vendor_binary == VK_TRUE;
+        }
+        (found.fault, found.fault_vendor_binary) = fault_feature_enables(present, device_fault, vendor_binary);
+        if !found.fault {
+            report_gpu_crash_piece_unavailable(
+                &W2107_FAULT_SITE,
+                "fault",
+                "the device does not advertise VK_EXT_device_fault with deviceFault",
+            );
+        } else if !found.fault_vendor_binary {
+            report_gpu_crash_piece_unavailable(
+                &W2107_FAULT_BINARY_SITE,
+                "fault vendor binary",
+                "the device does not support deviceFaultVendorBinary; the report carries no binary dump",
+            );
+        }
+    }
+    found
+}
+
+/// Resolves the entry points of every GB piece the instance and the device armed, dropping (with
+/// `boyko-W2107`) a piece whose entry points do not resolve. Cold: once per boot, and only when a
+/// level above `Off` was asked for.
+#[cold]
+#[inline(never)]
+fn arm_gpu_crash(
+    gipa: PfnVkGetInstanceProcAddr,
+    instance: VkInstance,
+    gdpa: PfnVkGetDeviceProcAddr,
+    device: VkDevice,
+    boot: GpuCrashBoot,
+) -> GpuCrashState {
+    let mut state = GpuCrashState { level: boot.level, ..GpuCrashState::OFF };
+    if boot.labels_enabled {
+        state.debug_utils = load_debug_utils_cmd_fns(gipa, instance);
+        if state.debug_utils.is_some() {
+            state.pieces |= piece::LABELS;
+        } else {
+            report_gpu_crash_piece_unavailable(
+                &W2107_LABELS_SITE,
+                "labels",
+                "the VK_EXT_debug_utils entry points did not resolve",
+            );
+        }
+    }
+    if boot.device.buffer_marker {
+        // SAFETY: `gdpa` is the live device's `vkGetDeviceProcAddr`, and `create_device` enabled
+        // `VK_AMD_buffer_marker` on `device` (the probe said yes), so the name resolves to the
+        // extension's command or NULL; `T` is its PFN typedef.
+        let write: Option<PfnVkCmdWriteBufferMarkerAmd> =
+            unsafe { load_device_command(gdpa, device, c"vkCmdWriteBufferMarkerAMD") }.ok();
+        match write {
+            Some(write_buffer_marker) => {
+                state.markers = Some(MarkerFns { write_buffer_marker });
+                state.pieces |= piece::MARKERS;
+            }
+            None => report_gpu_crash_piece_unavailable(
+                &W2107_MARKERS_SITE,
+                "markers",
+                "vkCmdWriteBufferMarkerAMD did not resolve",
+            ),
+        }
+    }
+    if boot.device.checkpoints {
+        // SAFETY: as above, for `VK_NV_device_diagnostic_checkpoints`'s two commands.
+        let set: Option<PfnVkCmdSetCheckpointNv> =
+            unsafe { load_device_command(gdpa, device, c"vkCmdSetCheckpointNV") }.ok();
+        // SAFETY: as above.
+        let get: Option<PfnVkGetQueueCheckpointDataNv> =
+            unsafe { load_device_command(gdpa, device, c"vkGetQueueCheckpointDataNV") }.ok();
+        match (set, get) {
+            (Some(set_checkpoint), Some(get_queue_checkpoint_data)) => {
+                state.checkpoints = Some(CheckpointFns { set_checkpoint, get_queue_checkpoint_data });
+                state.pieces |= piece::CHECKPOINTS;
+            }
+            _ => report_gpu_crash_piece_unavailable(
+                &W2107_CHECKPOINTS_SITE,
+                "checkpoints",
+                "the VK_NV_device_diagnostic_checkpoints entry points did not resolve",
+            ),
+        }
+    }
+    if boot.device.fault {
+        // SAFETY: as above — `create_device` enabled `VK_EXT_device_fault` with `deviceFault`.
+        let get: Option<PfnVkGetDeviceFaultInfoExt> =
+            unsafe { load_device_command(gdpa, device, c"vkGetDeviceFaultInfoEXT") }.ok();
+        match get {
+            Some(get_device_fault_info) => {
+                state.fault = Some(FaultFns { get_device_fault_info, vendor_binary: boot.device.fault_vendor_binary });
+                state.pieces |= piece::FAULT;
+            }
+            None => report_gpu_crash_piece_unavailable(
+                &W2107_FAULT_SITE,
+                "fault",
+                "vkGetDeviceFaultInfoEXT did not resolve",
+            ),
+        }
+    }
+    state
+}
+
+/// The three `VK_EXT_debug_utils` entry points GB's labels use, through `vkGetInstanceProcAddr`
+/// (the loader trampolines dispatch them to the device). `None` if any is missing.
+fn load_debug_utils_cmd_fns(gipa: PfnVkGetInstanceProcAddr, instance: VkInstance) -> Option<DebugUtilsCmdFns> {
+    // SAFETY: `gipa` is the live instance's `vkGetInstanceProcAddr` and `instance` was created
+    // with `VK_EXT_debug_utils` enabled (the caller's `labels_enabled`), so these names resolve to
+    // the extension's commands or to NULL; each `T` is the PFN typedef of its name's ABI.
+    unsafe {
+        Some(DebugUtilsCmdFns {
+            begin_label: load_instance_command(gipa, instance, c"vkCmdBeginDebugUtilsLabelEXT").ok()?,
+            end_label: load_instance_command(gipa, instance, c"vkCmdEndDebugUtilsLabelEXT").ok()?,
+            set_object_name: load_instance_command(gipa, instance, c"vkSetDebugUtilsObjectNameEXT").ok()?,
+        })
+    }
+}
+
 /// Queries the minimal Render P1b [`DeviceCaps`]: whether the GPU advertises (T-dev)
 /// the 5 bindless-prerequisite `VkPhysicalDeviceDescriptorIndexingFeatures` bits
 /// (chained into `vkGetPhysicalDeviceFeatures2` — the SAME granular struct
@@ -4290,6 +4651,93 @@ struct DeviceEnables {
     /// walk order. Enabling it records no commands and changes no frame; the goldens are
     /// unaffected.
     enable_calibrated_timestamps: bool,
+    /// Render rung GB: appends `VK_AMD_buffer_marker` (breadcrumbs). No feature struct; it records
+    /// nothing until a GB-armed frame writes a marker, so an unarmed frame is unchanged.
+    enable_buffer_marker: bool,
+    /// Render rung GB: appends `VK_NV_device_diagnostic_checkpoints`. No feature struct.
+    enable_checkpoints: bool,
+    /// Render rung GB: appends `VK_EXT_device_fault` and chains `VkPhysicalDeviceFaultFeaturesEXT`
+    /// with `deviceFault` set. A `pNext` feature bit and an entry point read only after a device
+    /// loss: an unarmed frame records nothing different.
+    enable_device_fault: bool,
+    /// Render rung GB: also sets `deviceFaultVendorBinary` — `true` only when the device reported
+    /// that bit, which is NOT implied by the extension (an iGPU here reports `deviceFault` alone).
+    enable_device_fault_vendor_binary: bool,
+}
+
+/// Every device extension name one boot can enable: 1 swapchain, 3 RT, 1 calibrated timestamps
+/// and 3 GB (buffer marker, checkpoints, device fault). The builder indexes without a bounds
+/// check, so this sum is the load-bearing part: an array outgrown by a new extension is an index
+/// panic at boot on exactly the machines that support the most.
+const MAX_DEVICE_EXTENSIONS: usize = 1 + 3 + 1 + 3;
+
+/// The device extensions one boot enables, in enable order — a pure function, so the GB-off
+/// array can be pinned against the pre-GB one without a device. GB's names come LAST, after the
+/// `hwrt` names, so no pre-GB index moves.
+fn device_extension_list(windowed: bool, e: &DeviceEnables) -> ([&'static CStr; MAX_DEVICE_EXTENSIONS], usize) {
+    let mut names: [&'static CStr; MAX_DEVICE_EXTENSIONS] = [c""; MAX_DEVICE_EXTENSIONS];
+    let mut count = 0usize;
+    if windowed {
+        names[count] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        count += 1;
+    }
+    // Profiling rung 9. Appended BEFORE the hwrt arm so the `hwrt`-off and `hwrt`-on builds put
+    // this string at the same index — the array is order-insensitive to Vulkan, but a stable
+    // index is what lets a boot dump be compared across the two builds.
+    if e.enable_calibrated_timestamps {
+        names[count] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+        count += 1;
+    }
+    #[cfg(feature = "hwrt")]
+    if e.enable_ray_query {
+        names[count] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
+        count += 1;
+        names[count] = VK_KHR_RAY_QUERY_EXTENSION_NAME;
+        count += 1;
+        names[count] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME;
+        count += 1;
+    }
+    if e.enable_buffer_marker {
+        names[count] = VK_AMD_BUFFER_MARKER_EXTENSION_NAME;
+        count += 1;
+    }
+    if e.enable_checkpoints {
+        names[count] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
+        count += 1;
+    }
+    if e.enable_device_fault {
+        names[count] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+        count += 1;
+    }
+    (names, count)
+}
+
+/// The fault features to request, from what the device reported: `deviceFault` only with the
+/// extension present and the bit supported, and `deviceFaultVendorBinary` only on top of that and
+/// with its OWN bit supported — requesting an unsupported feature bit is a hard `vkCreateDevice`
+/// failure (critique W4). Pure.
+fn fault_feature_enables(extension_present: bool, device_fault: bool, vendor_binary: bool) -> (bool, bool) {
+    let fault = extension_present && device_fault;
+    (fault, fault && vendor_binary)
+}
+
+/// A zeroed `VkPhysicalDeviceFaultFeaturesEXT` except for `s_type` — the shared template of the
+/// support query and the enable (the `zeroed_host_query_reset_features` reason).
+fn zeroed_fault_features() -> VkPhysicalDeviceFaultFeaturesExt {
+    VkPhysicalDeviceFaultFeaturesExt {
+        s_type: VkStructureType::PhysicalDeviceFaultFeaturesExt,
+        p_next: ptr::null_mut(),
+        device_fault: VK_FALSE,
+        device_fault_vendor_binary: VK_FALSE,
+    }
+}
+
+/// The enable node for the fault features `create_device` chains (render rung GB). Pure.
+fn fault_features_node(device_fault: bool, vendor_binary: bool) -> VkPhysicalDeviceFaultFeaturesExt {
+    let mut node = zeroed_fault_features();
+    node.device_fault = if device_fault { VK_TRUE } else { VK_FALSE };
+    node.device_fault_vendor_binary = if device_fault && vendor_binary { VK_TRUE } else { VK_FALSE };
+    node
 }
 
 fn create_device(
@@ -4299,11 +4747,14 @@ fn create_device(
     windowed: bool,
     enables: DeviceEnables,
 ) -> Result<VkDevice, BootError> {
+    let (ext_names, ext_count) = device_extension_list(windowed, &enables);
     let DeviceEnables {
         enable_ray_query,
         enable_vb_geometry_table,
         enable_host_query_reset,
-        enable_calibrated_timestamps,
+        enable_device_fault,
+        enable_device_fault_vendor_binary,
+        ..
     } = enables;
     let _ = enable_ray_query; // read only on the hwrt arm below (silences the OFF build).
     // Correction #2 (OQ-6), generalised to every required row: fail fast with a NAMED error if
@@ -4347,32 +4798,11 @@ fn create_device(
     let mut features13 = zeroed_features13();
     apply_required_v13(&mut features13);
 
-    // The extension name pointers this device enables. The base set is the windowed-only
-    // `VK_KHR_swapchain`; the hwrt arm appends the 3 RT strings when `enable_ray_query`; profiling
-    // rung 9 appends `VK_EXT_calibrated_timestamps` when `enable_calibrated_timestamps`.
-    // A fixed-capacity stack array (no heap) sized to the maximum (1 swapchain + 3 RT + 1
-    // calibrated timestamps). The capacity is CHECKED by the const-assert below rather than by a
-    // comment: there is no bounds check on the appends, so an array outgrown by a new extension is
-    // an index panic at boot on exactly the machines that support the most.
-    /// 1 swapchain + 3 RT + 1 calibrated timestamps. Every arm below indexes without a bounds
-    /// check, so this sum is the load-bearing part: an array outgrown by a new extension is an
-    /// index panic at boot on exactly the machines that support the most.
-    const MAX_DEVICE_EXTENSIONS: usize = 1 + 3 + 1;
-    let mut ext_ptrs: [*const c_char; MAX_DEVICE_EXTENSIONS] =
-        [ptr::null(); MAX_DEVICE_EXTENSIONS];
-    let mut ext_count: usize = 0;
-    if windowed {
-        ext_ptrs[ext_count] = VK_KHR_SWAPCHAIN_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-    }
-
-    // Profiling rung 9. Appended BEFORE the hwrt arm so the `hwrt`-off and `hwrt`-on builds put
-    // this string at the same index — the array is order-insensitive to Vulkan, but a stable
-    // index is what lets a boot dump be compared across the two builds.
-    if enable_calibrated_timestamps {
-        ext_ptrs[ext_count] = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-    }
+    // The extension name pointers this device enables, from the pure builder
+    // [`device_extension_list`]: the windowed-only `VK_KHR_swapchain`, profiling rung 9's
+    // `VK_EXT_calibrated_timestamps`, the hwrt arm's 3 RT strings, then render rung GB's. A
+    // fixed-capacity stack array (no heap) sized to `MAX_DEVICE_EXTENSIONS`.
+    let ext_ptrs: [*const c_char; MAX_DEVICE_EXTENSIONS] = ext_names.map(CStr::as_ptr);
 
     // HW-RT rung R2a-1: enable the 3 RT extensions + chain the RT feature structs off
     // `features13.p_next`. Only ever reached when `enable_ray_query` (⇒
@@ -4392,12 +4822,7 @@ fn create_device(
             VkPhysicalDeviceAccelerationStructureFeaturesKHR,
             VkPhysicalDeviceBufferDeviceAddressFeatures, VkPhysicalDeviceRayQueryFeaturesKHR,
         };
-        ext_ptrs[ext_count] = VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-        ext_ptrs[ext_count] = VK_KHR_RAY_QUERY_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
-        ext_ptrs[ext_count] = VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME.as_ptr();
-        ext_count += 1;
+        // (The 3 RT extension strings come from `device_extension_list`.)
         // Build tail-first: bda (tail, p_next null) → accel → rayQuery, then hook the
         // head onto `features13.p_next`. Final walk order: descriptorIndexing →
         // features13 → rayQuery → accel → bda (each ENABLE bit TRUE). The feature-struct
@@ -4483,8 +4908,17 @@ fn create_device(
     // descriptorIndexing → features13 → (hwrt only) rayQuery → accelerationStructure →
     // bufferDeviceAddress. Unlike the pre-T-dev chain, the head never changes shape
     // between builds — the RT sub-chain hangs off `features13.p_next` instead.
-    let p_next: *const c_void =
-        (&descriptor_indexing as *const VkPhysicalDeviceDescriptorIndexingFeatures).cast();
+    // Render rung GB: the fault features node is spliced in at the HEAD, in front of the
+    // descriptor-indexing struct, only when the fault piece is enabled — the rest of the chain is
+    // untouched, and with the piece off the walk order is byte-identical to before.
+    let mut fault_features = fault_features_node(enable_device_fault, enable_device_fault_vendor_binary);
+    let p_next: *const c_void = if enable_device_fault {
+        fault_features.p_next =
+            (&descriptor_indexing as *const VkPhysicalDeviceDescriptorIndexingFeatures).cast::<c_void>() as *mut c_void;
+        (&fault_features as *const VkPhysicalDeviceFaultFeaturesExt).cast()
+    } else {
+        (&descriptor_indexing as *const VkPhysicalDeviceDescriptorIndexingFeatures).cast()
+    };
 
     // Core (Vulkan 1.0) features passed via `p_enabled_features`, NOT `pNext` (the two
     // are mutually exclusive — VUID-VkDeviceCreateInfo-pNext-00373). Exactly the
@@ -4883,6 +5317,155 @@ mod tests {
         super::report_shadow_denoise_storage_unsupported(false, true);
         drain();
         assert_eq!(observed(), after_first, "a spent Once site let a second W2102 through");
+    }
+
+    /// **`boyko-W2107`: one latch per GB piece, one record per piece** (render rung GB) — the
+    /// `W2102` shape: each piece degrades on its own, so each must report on its own.
+    ///
+    /// RED: hand every call the same latch and this asserts `1 == SITES`.
+    #[test]
+    fn w2107_reports_each_unavailable_piece_once() {
+        let _guard = ENV_AND_BOOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _observe = observe_lock();
+        arm();
+        let sites = [
+            (&super::W2107_LABELS_SITE, "labels"),
+            (&super::W2107_MARKERS_SITE, "markers"),
+            (&super::W2107_CHECKPOINTS_SITE, "checkpoints"),
+            (&super::W2107_FAULT_SITE, "fault"),
+            (&super::W2107_FAULT_BINARY_SITE, "fault vendor binary"),
+        ];
+        for (site, _) in sites {
+            site.reset();
+        }
+        let before = observed();
+        for (site, name) in sites {
+            super::report_gpu_crash_piece_unavailable(site, name, "test");
+        }
+        drain();
+        assert_eq!(observed() - before, sites.len() as u64, "boyko-W2107 must report every unavailable piece");
+        let after_first = observed();
+        for (site, name) in sites {
+            super::report_gpu_crash_piece_unavailable(site, name, "test");
+        }
+        drain();
+        assert_eq!(observed(), after_first, "each W2107 site is Once");
+    }
+
+    /// Render rung GB: with the labels piece off, the instance extension array is exactly the
+    /// pre-GB one for every validation/WSI combination — GB off adds no extension. With it on,
+    /// `VK_EXT_debug_utils` takes its one shared slot, never a second one beside validation's.
+    ///
+    /// RED: push the extension a second time for `labels` and the validation-on rows repeat it.
+    #[test]
+    fn gb_off_instance_extensions_are_the_pre_gb_array() {
+        use super::{InstanceExtensionInputs, instance_extension_list};
+        for bits in 0u8..8 {
+            let validation = bits & 1 != 0;
+            let sync_validation = validation && bits & 2 != 0;
+            let windowed = bits & 4 != 0;
+            // The pre-GB construction, spelled as it was.
+            let mut want: Vec<&core::ffi::CStr> = Vec::new();
+            if validation {
+                want.push(super::VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+            }
+            if sync_validation {
+                want.push(super::VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+            }
+            if windowed {
+                want.push(super::VK_KHR_SURFACE_EXTENSION_NAME);
+                want.push(super::VK_KHR_WIN32_SURFACE_EXTENSION_NAME);
+            }
+            let off = InstanceExtensionInputs { validation, sync_validation, labels: false, windowed };
+            let (names, count) = instance_extension_list(off);
+            assert_eq!(&names[..count], &want[..], "GB off changed the instance extensions");
+
+            let (on, on_count) = instance_extension_list(InstanceExtensionInputs { labels: true, ..off });
+            let debug_utils = on[..on_count]
+                .iter()
+                .filter(|n| **n == super::VK_EXT_DEBUG_UTILS_EXTENSION_NAME)
+                .count();
+            assert_eq!(debug_utils, 1, "VK_EXT_debug_utils has one slot (validation={validation})");
+        }
+    }
+
+    fn enables(calibrated: bool, ray_query: bool, gb: bool) -> super::DeviceEnables {
+        super::DeviceEnables {
+            enable_ray_query: ray_query,
+            enable_vb_geometry_table: false,
+            enable_host_query_reset: false,
+            enable_calibrated_timestamps: calibrated,
+            enable_buffer_marker: gb,
+            enable_checkpoints: gb,
+            enable_device_fault: gb,
+            enable_device_fault_vendor_binary: gb,
+        }
+    }
+
+    /// Render rung GB: with every GB piece off, the device extension array is exactly the pre-GB
+    /// one for every swapchain / calibrated-timestamps / ray-query combination; with them on, GB's
+    /// names are appended after every pre-GB name, so no pre-GB index moves.
+    ///
+    /// RED: put GB's names first in `device_extension_list` and the GB-on rows move the swapchain.
+    #[test]
+    fn gb_off_device_extensions_are_the_pre_gb_array() {
+        for bits in 0u8..8 {
+            let windowed = bits & 1 != 0;
+            let calibrated = bits & 2 != 0;
+            // `enable_ray_query` is only ever `true` on an `hwrt` build.
+            let ray_query = cfg!(feature = "hwrt") && bits & 4 != 0;
+            let mut want: Vec<&core::ffi::CStr> = Vec::new();
+            if windowed {
+                want.push(super::VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+            }
+            if calibrated {
+                want.push(super::VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME);
+            }
+            #[cfg(feature = "hwrt")]
+            if ray_query {
+                want.push(super::VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+                want.push(super::VK_KHR_RAY_QUERY_EXTENSION_NAME);
+                want.push(super::VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+            }
+            let (names, count) = super::device_extension_list(windowed, &enables(calibrated, ray_query, false));
+            assert_eq!(&names[..count], &want[..], "GB off changed the device extensions");
+
+            let (on, on_count) = super::device_extension_list(windowed, &enables(calibrated, ray_query, true));
+            assert_eq!(&on[..count], &want[..], "GB on moved a pre-GB device extension");
+            assert_eq!(
+                &on[count..on_count],
+                &[
+                    super::VK_AMD_BUFFER_MARKER_EXTENSION_NAME,
+                    super::VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME,
+                    super::VK_EXT_DEVICE_FAULT_EXTENSION_NAME,
+                ],
+            );
+        }
+    }
+
+    /// Critique W4: `deviceFaultVendorBinary` is requested only when the device reported THAT
+    /// bit — an iGPU here reports `deviceFault = true, deviceFaultVendorBinary = false`, and
+    /// requesting the second would fail `vkCreateDevice` on every armed level.
+    ///
+    /// RED: derive the vendor-binary enable from the extension's presence and the node carries
+    /// the bit on the iGPU's mask.
+    #[test]
+    fn the_fault_node_never_requests_an_unsupported_vendor_binary() {
+        use crate::ffi::{VK_FALSE, VK_TRUE};
+        // (extension present, deviceFault, deviceFaultVendorBinary) -> (fault, vendor binary)
+        let rows = [
+            ((true, true, true), (true, true)),   // the RTX 5080
+            ((true, true, false), (true, false)), // the AMD iGPU
+            ((true, false, true), (false, false)),
+            ((false, true, true), (false, false)),
+        ];
+        for ((present, fault, binary), want) in rows {
+            let got = super::fault_feature_enables(present, fault, binary);
+            assert_eq!(got, want, "enables for present={present} fault={fault} binary={binary}");
+            let node = super::fault_features_node(got.0, got.1);
+            assert_eq!(node.device_fault, if want.0 { VK_TRUE } else { VK_FALSE });
+            assert_eq!(node.device_fault_vendor_binary, if want.1 { VK_TRUE } else { VK_FALSE });
+        }
     }
 }
 

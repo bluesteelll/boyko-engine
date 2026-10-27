@@ -655,6 +655,14 @@ fn run_worker(worker: Worker) {
     if worker == Worker::DeferredSsaa {
         app.insert_resource(AaConfig { mode: AaMode::Ssaa });
     }
+    // Render rung GB (G4): every path worker boots with the GPU crash diagnostics at their
+    // highest level, so this gate also proves the labels, breadcrumbs, checkpoints and the fault
+    // feature validation-clean on every configuration it boots — a strict superset of the
+    // default boot (each piece the device lacks degrades with W2107 and records nothing). The
+    // canary stays at the default: its job is to prove the oracle hears, not to vary the subject.
+    if worker != Worker::Canary {
+        app.insert_resource(boyko_app::GpuCrashDiag { level: boyko_app::GpuCrashDiagLevel::Checkpoints });
+    }
 
     app.run();
 
@@ -684,6 +692,33 @@ fn run_worker(worker: Worker) {
          messengers_destroyed = {}).",
         after.messengers_destroyed
     );
+
+    // Render rung GB (G4): the path workers' witness that the diagnostics were ARMED and verified
+    // frames under validation — a clean run with GB silently off would prove nothing about GB.
+    if worker != Worker::Canary {
+        let gb = app.world().try_resource::<boyko_app::GpuCrumbLedger>().copied();
+        eprintln!("BOOT-VALIDATION {name}: GPU crash diagnostics {gb:?}");
+        let gb = gb.unwrap_or_else(|| {
+            panic!("GPU CRASH DIAGNOSTICS NOT ARMED ({name}): no GpuCrumbLedger after a boot asked for Checkpoints")
+        });
+        assert!(
+            gb.frame_pieces != 0 && gb.counts.frames_checked > 0,
+            "GPU CRASH DIAGNOSTICS DID NOT RECORD ({name}): {gb:?}"
+        );
+        // The ledger is this gate's observer of a SYSTEMATIC breadcrumb break (GB review r2 W1):
+        // a marker that never lands leaves every frame incomplete, no later frame completes, and
+        // the debug completion assert inside the verification — which waits for a frame that
+        // proves the device alive (GB review r1 W1) — never fires. A device loss before the last
+        // budgeted frame ends the frame loop early and has already red the budget assert above.
+        assert!(
+            gb.counts.frames_incomplete == 0,
+            "GB BREADCRUMBS INCOMPLETE ({name}): {} of {} verified frames lacked a breadcrumb after \
+             their fence wait -- a scope's marker never landed (a device loss prints boyko-E3003 \
+             first): {gb:?}",
+            gb.counts.frames_incomplete,
+            gb.counts.frames_checked
+        );
+    }
 
     if worker == Worker::Canary {
         let before = app

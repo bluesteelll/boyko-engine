@@ -211,7 +211,7 @@ mirror image stayed open: every CI job ran on `ubuntu-latest`, so **no job compi
 `miri` and `loom`, runs on `windows-latest`**, the platform the engine is developed, measured and
 pinned on. Those jobs are
 `test`, `profile-census`, `reflect-on`, `reflect-census`, `reflect-dogfood`,
-`feature-count-tests` and `force-alloc-panic`. They compile that path at default features and run
+`feature-count-tests`, `force-alloc-panic` and (2026-10-27, render rung GB) `gpu-crash-census`. They compile that path at default features and run
 its device-free tests. Two kinds of job stay on `ubuntu-latest`, both blocking. The first is the
 build-only jobs: `check`, `clippy`, `profile-legs`, `feature-legs` and `bench-compile`. They keep
 the engine compiling for Linux. The second is `miri` and `loom`, which pass there. What is still
@@ -348,7 +348,7 @@ so a reshaped job exits 2 ("adapter cannot read job X") instead of being skipped
 | `script` | the job's `python3 <script>` line | `hot-path-exceptions`, `doc-contracts` |
 | `linux` | only with `--linux` (ruling 101): a cross check, the job's cargo line with `--target x86_64-unknown-linux-gnu --keep-going` and the CI's `RUSTFLAGS`, in `--linux-target-dir` (a matrix job's own `CARGO_TARGET_DIR`, e.g. `target-editor`, becomes a sub-directory) | `check`, `clippy`, `profile-legs` (4 legs), `feature-legs` (the yml's own derivation step, then every derived leg) |
 | `linux-compile-only` | only with `--linux` (ruling 101): the compile half of a job whose other half needs Linux | `bench-compile` (`check --profile bench --lib --bins --benches`: a bench build links), `test-linux:release` (`check --release`: the only Linux check of the `cfg(not(debug_assertions))` set) |
-| `host` | the job's `run:` blocks verbatim in Git Bash | `profile-census`, `reflect-on` (2 legs), `reflect-census`, `feature-count-tests`, `miri`, `loom` |
+| `host` | the job's `run:` blocks verbatim in Git Bash | `profile-census`, `reflect-on` (2 legs), `reflect-census`, `feature-count-tests`, `miri`, `loom`, `gpu-crash-census` |
 | `host-heavy` | as `host`, only with `--heavy` | `test` (2 legs), `reflect-dogfood`, `force-alloc-panic` |
 | `not-runnable` | nothing; the row's reason is printed | `test-linux:debug` (its compile half is the `check` row's selection, which the mirror verifies on every run) |
 

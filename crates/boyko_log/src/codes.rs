@@ -968,6 +968,11 @@ codes! {
     // renders. The class letter IS the level in this registry, so one code could not carry both.
     (2106, W, W2106, RatePolicy::Every, CodeStatus::Live,
         "An optional shadow chain's sets failed to build, so the chain is skipped this frame"),
+    // Render rung GB. `Once` per SITE, `W2102`'s F11 shape: the four GPU crash-diagnostics pieces
+    // (labels, markers, checkpoints, the fault query) degrade independently, so each owns a latch
+    // and a device missing three of them prints three lines. A boot-time notice, never per frame.
+    (2107, W, W2107, RatePolicy::Once,  CodeStatus::Live,
+        "A requested GPU crash-diagnostics piece is unavailable on this device, so the run continues without it"),
     // ── L8a: `boyko_render` ─────────────────────────────────────────────────────────────────
     // The ledger gave `light_system.rs`'s TWO sites one code, `W2201`, with a `dropped_count`
     // argument. Measuring the fold refuted both halves of that row:
@@ -1114,6 +1119,13 @@ codes! {
     // second.
     (3012, W, W3012, RatePolicy::Once,  CodeStatus::Live,
         "No PostPlugin was composed, so the runner derives the post settings from LightingConfig"),
+    // ── render rung GB: the device-loss report ───────────────────────────────────────────────
+    // Its own code, not `E3003`'s: `E3003` is the generic terminal device error (it also covers an
+    // out-of-device-memory exit), while this is the crash report that follows a DEVICE LOSS, with
+    // its own content (the in-flight scopes, the checkpoints, the fault record) and its own fix.
+    // `Every`: one record per report line, and a terminal path - the loop returns after it.
+    (3013, E, E3013, RatePolicy::Every, CodeStatus::Live,
+        "A device loss was diagnosed, and the GPU crash report follows"),
 
     (9001, B, B9001, RatePolicy::Every, CodeStatus::Live,
         "The schedule contains a cycle of systems"),
@@ -1497,6 +1509,9 @@ mod tests {
             (b'W', 2104), // L7b -- textured material suppressed by motion vectors
             (b'W', 2105), // L7b -- present mode not advertised, fell back to fifo
             (b'W', 2106), // L7b -- an optional shadow chain's sets failed to build
+            // Render rung GB. Added in its review round 1: the rung flipped both GB rows and was
+            // verified with `--test code_registry` only -- the blind spot the note above names.
+            (b'W', 2107), // GB  -- a requested GPU crash-diagnostics piece is unavailable (five sites)
             (b'W', 2201), // L8a -- more lights than the GPU table holds
             (b'W', 2202), // L8a -- a bindless table exhausted its slots (two sites, one code)
             (b'E', 2203), // L8a -- a GPU dispatch failed with no error channel to report it
@@ -1522,6 +1537,7 @@ mod tests {
             (b'E', 3010), // L8b -- a diagnostic dump could not be written (five sites)
             (b'E', 3011), // A6  -- a panic escaped a host-owned ECS entry point, process aborting
             (b'W', 3012), // PX1a -- no PostPlugin composed, the runner derives the post settings
+            (b'E', 3013), // GB  -- a device loss was diagnosed, the GPU crash report follows
             (b'B', 9001), // L6  -- schedule cycle
             (b'B', 9002), // L6  -- set-hierarchy cycle
             (b'B', 9004), // L6  -- two ordered sets share a member

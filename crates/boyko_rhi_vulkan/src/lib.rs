@@ -131,6 +131,10 @@ pub mod framegraph;
 /// ([`geometry_bindless::write_geometry_buffer_slot`]). A sibling of, not a reuse of,
 /// [`bindless::VulkanBindlessSet`] — see the module doc for why.
 pub mod geometry_bindless;
+/// Render rung GB — GPU crash diagnostics: the arming level and its build ceiling, the armed
+/// pieces, and the optional extension entry points a booted context carries. The per-scope
+/// recording is `present::gpu_crumbs`.
+pub mod gpu_crash;
 /// Test-only: the two helpers the four `boyko-2xxx` observing tests share (L7b).
 #[cfg(test)]
 pub(crate) mod log_probe;

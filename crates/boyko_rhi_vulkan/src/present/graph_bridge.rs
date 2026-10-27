@@ -163,6 +163,12 @@ pub(crate) struct GbufferPassPlan {
     /// the last `lit` producer (and the SDF depth merge) and before `particle_draw` — `Some` only on
     /// the engine frame `Renderer::arm_nan_inject` named (never on a shipped run).
     pub(crate) test_nan_inject: Option<crate::framegraph::PassId>,
+    /// Render rung GB (G3): the TEST-ONLY `test_gpu_hang` pass, declared right after
+    /// `test_nan_inject`'s slot — `Some` only on the engine frame `Renderer::arm_gpu_hang` named
+    /// (never on a shipped run: arming needs a force key, an opt-in variable and a build ceiling of
+    /// at least `markers`). It declares no access, so it records no barrier; it is a GB scope by
+    /// construction because it crosses the funnel.
+    pub(crate) test_gpu_hang: Option<crate::framegraph::PassId>,
     /// Particles P0: the conditional-tail pass map. Every member is `None` on a disarmed frame
     /// (nothing declared at all — see [`ParticlePassPlan`]).
     pub(crate) particle: ParticlePassPlan,
@@ -3446,6 +3452,11 @@ impl Renderer<'_> {
         // Render wave PX1a (H4 Scope 3, test 12): the TEST-ONLY NaN injection — after every `lit`
         // producer (and the depth merge), before the transparent slot; one frame, armed runs only.
         let test_nan_inject = nan_inject_now.then(|| declare_test_nan_inject(g, lit));
+        // Render rung GB (G3): the TEST-ONLY hang pass, on the one armed frame (a `shipping` build
+        // folds the whole condition away).
+        let test_gpu_hang = (crate::gpu_crash::GpuCrashDiagLevel::COMPILED_IN
+            && self.gpu_hang_at == Some(scene.engine_frame_index))
+        .then(|| g.add_pass("test_gpu_hang"));
         if let Some(ids) = particle_res {
             particle_plan.draw = Some(declare_particle_draw(
                 g,
@@ -3558,6 +3569,7 @@ impl Renderer<'_> {
             post,
             sdf_depth_merge,
             test_nan_inject,
+            test_gpu_hang,
             particle: particle_plan,
             image_dump,
         });
@@ -4157,6 +4169,11 @@ impl Renderer<'_> {
                 (&buffers.meta, &buffers.handles.map(|h| h.0), &other_buffers.handles.map(|h| h.0)),
             );
         }
+        // Render rung GB: this pass's chained scope (label, breadcrumbs, checkpoints) opens here,
+        // before its barriers, and runs to the next scope. The sink fill above records nothing.
+        if self.crumbs_armed() {
+            self.crumb_enter_pass(cmd, pass, &images.handles, &buffers.handles, FRAMEGRAPH_IMAGE_COUNT);
+        }
         let mut sink = GbufferBarrierSink {
             fns: self.fns,
             cmd,
@@ -4201,6 +4218,11 @@ impl Renderer<'_> {
                 (&images.meta, &images.handles.map(|h| h.0), &other_images.handles.map(|h| h.0)),
                 (&buffers.meta, &buffers.handles.map(|h| h.0), &other_buffers.handles.map(|h| h.0)),
             );
+        }
+        // Render rung GB: this pass's chained scope (label, breadcrumbs, checkpoints) opens here,
+        // before its barriers, and runs to the next scope. The sink fill above records nothing.
+        if self.crumbs_armed() {
+            self.crumb_enter_pass(cmd, pass, &images.handles, &buffers.handles, FORWARD_IMAGE_COUNT);
         }
         let mut sink = ForwardBarrierSink {
             fns: self.fns,
@@ -7640,6 +7662,11 @@ impl Renderer<'_> {
                 (&images.meta, &images.handles.map(|h| h.0), &other_images.handles.map(|h| h.0)),
                 (&buffers.meta, &buffers.handles.map(|h| h.0), &other_buffers.handles.map(|h| h.0)),
             );
+        }
+        // Render rung GB: this pass's chained scope (label, breadcrumbs, checkpoints) opens here,
+        // before its barriers, and runs to the next scope. The sink fill above records nothing.
+        if self.crumbs_armed() {
+            self.crumb_enter_pass(cmd, pass, &images.handles, &buffers.handles, VB_IMAGE_COUNT);
         }
         let mut sink = VbBarrierSink {
             fns: self.fns,

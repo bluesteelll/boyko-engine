@@ -107,6 +107,17 @@ pub struct Renderer<'ctx> {
     /// [`arm_nan_inject`](Self::arm_nan_inject) (boot, the `inject_nan_lit` force key). `None` in
     /// every shipped run: no pass, no `TRANSFER_DST` on `lit`, no source buffer.
     pub(crate) nan_inject_at: Option<u32>,
+    /// Render rung GB: the armed per-frame GPU crash-diagnostics pieces (`piece::LABELS |
+    /// MARKERS | CHECKPOINTS` bits), read from the context at [`new`](Self::new). `0` in every
+    /// unarmed run: the ONE byte every GB site tests (`crumbs_armed`).
+    pub(crate) crumb_bits: u8,
+    /// Render rung GB: the chained-scope state (marker buffer, slot shadows, ledger) — `Some` iff
+    /// `crumb_bits != 0`. Boxed: allocated once at boot, armed runs only.
+    pub(crate) crumbs: Option<Box<super::gpu_crumbs::CrumbState>>,
+    /// Render rung GB (G3): the engine frame the TEST-ONLY `test_gpu_hang` pass is declared and
+    /// recorded on — `Some` only after [`arm_gpu_hang`](Self::arm_gpu_hang) accepted. `None` in
+    /// every shipped run.
+    pub(crate) gpu_hang_at: Option<u32>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -256,6 +267,15 @@ impl<'ctx> Renderer<'ctx> {
         );
         frame_graph.compile();
 
+        // Render rung GB: the chained-scope state, `None` unless the context armed a per-frame
+        // piece (the `COMPILED_IN` conjunct deletes the call from a `shipping` build).
+        let crumbs = if crate::gpu_crash::GpuCrashDiagLevel::COMPILED_IN {
+            super::gpu_crumbs::CrumbState::new(ctx, fns, device, &command_buffers)
+        } else {
+            None
+        };
+        let crumb_bits = crumbs.as_deref().map_or(0, |c| c.bits);
+
         Ok(Self {
             device,
             fns,
@@ -276,7 +296,27 @@ impl<'ctx> Renderer<'ctx> {
             receipt: None,
             image_dump: None,
             nan_inject_at: None,
+            crumb_bits,
+            crumbs,
+            gpu_hang_at: None,
         })
+    }
+
+    /// Render rung GB (G3): arms the TEST-ONLY `test_gpu_hang` pass on engine frame `at_frame`.
+    /// Accepted only when the build compiles GB in at `markers` or above and this run armed the
+    /// breadcrumbs — the forced-hang gate reads them back — and refused (returns `false`)
+    /// otherwise, so a `shipping` build can never arm it. The caller (the windowed runner) also
+    /// requires the `inject_gpu_hang` force key AND the explicit opt-in variable. Cold — once, at
+    /// boot.
+    #[cold]
+    #[inline(never)]
+    pub fn arm_gpu_hang(&mut self, at_frame: u32) -> bool {
+        let ok = crate::gpu_crash::GpuCrashDiagLevel::CEILING >= crate::gpu_crash::GpuCrashDiagLevel::Markers
+            && self.crumb_bits & crate::gpu_crash::piece::MARKERS != 0;
+        if ok {
+            self.gpu_hang_at = Some(at_frame);
+        }
+        ok
     }
 
     /// Render wave PX1a (H4 Scope 3, test 12): arms the TEST-ONLY NaN injection — the targets
@@ -537,6 +577,13 @@ impl<'ctx> Renderer<'ctx> {
         let result = VkResult::from_raw(raw);
         if !result.is_success() {
             return Err(SwapchainError::VkError("vkWaitForFences", result));
+        }
+        // Render rung GB (G2): verify this slot's previous frame before the record below
+        // overwrites the slot's shadow. A `VK_SUCCESS` wait does not prove the frame finished —
+        // the spec allows it on a lost device — so an incomplete frame is kept as the loss
+        // suspect for the device-loss report rather than asserted (`gpu_crumbs::verify_frame`).
+        if self.crumbs_armed() {
+            self.crumb_verify_slot(self.frame_index);
         }
 
         // Pre-record sync: the fence wait above guarantees no in-flight frame still
@@ -1063,6 +1110,10 @@ impl<'ctx> Renderer<'ctx> {
                     // Review r1 W1: the declaration reads THESE targets' TAA history, so a
                     // degraded history declares (and the recorders record) the TAA-off frame.
                     this.declare_frame_graph(scene, targets.taa_history_built());
+                    // Render rung GB: a new serial and the pass-name snapshot for this slot.
+                    if this.crumbs_armed() {
+                        this.crumb_begin_frame(scene.resolved_render_path.path);
+                    }
 
                     // Multi-paradigm render-path plan, rung R4b-b: mirrors
                     // `declare_frame_graph`'s dispatch (`scene.path_is_forward()` is the SAME
@@ -1251,6 +1302,10 @@ impl Drop for Renderer<'_> {
         // belong to this device.
         unsafe {
             (self.fns.device_wait_idle)(self.device);
+            // Render rung GB: the marker buffer, now that nothing in flight writes it.
+            if let Some(c) = self.crumbs.as_deref() {
+                c.destroy(self.fns);
+            }
             for &s in &self.render_finished {
                 (self.fns.destroy_semaphore)(self.device, s, ptr::null());
             }

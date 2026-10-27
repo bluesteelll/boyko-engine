@@ -195,6 +195,7 @@ bench-compile | linux-compile-only | `cargo bench --no-run` links, and this host
 force-alloc-panic | host-heavy | A second release workspace test run. COVERED by `test:release` while no `.rs` reads `cfg(force_alloc_panic)` and the job's RUSTFLAGS differ from the top level by that flag alone; else run with --fap-target-dir.
 miri | host | Host target (CI interprets the Linux one), and the config's `target-cpu` reaches the build where CI's job RUSTFLAGS drops it, so Miri interprets boyko_ecs's AVX2 arms here; the row names them.
 loom | host | Both steps natively in <host target dir>/ci-mirror-loom; step 1's job RUSTFLAGS ride the per-target key CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS (the loom recipe), never `build.rustflags`.
+gpu-crash-census | host | The job's step verbatim; the census's two nested release builds write <host target dir>/../gb-census-dev and ../gb-census-shipping, the test's own rule (siblings of CARGO_TARGET_DIR), not under the host target dir.
 """
 # === CI-MIRROR JOB TABLE END ===
 

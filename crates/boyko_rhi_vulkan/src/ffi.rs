@@ -466,6 +466,10 @@ impl VkResult {
     pub const ERROR_OUT_OF_HOST_MEMORY: Self = Self(-1);
     pub const ERROR_OUT_OF_DEVICE_MEMORY: Self = Self(-2);
     pub const ERROR_INITIALIZATION_FAILED: Self = Self(-3);
+    /// `VK_ERROR_DEVICE_LOST` — the logical device was lost (a GPU hang, a page fault, a driver
+    /// reset). Terminal for the device; render rung GB's report reads the breadcrumbs, the
+    /// checkpoints and `VK_EXT_device_fault` after it.
+    pub const ERROR_DEVICE_LOST: Self = Self(-4);
     pub const ERROR_LAYER_NOT_PRESENT: Self = Self(-6);
     pub const ERROR_EXTENSION_NOT_PRESENT: Self = Self(-7);
     pub const ERROR_FEATURE_NOT_PRESENT: Self = Self(-8);
@@ -508,6 +512,7 @@ impl core::fmt::Debug for VkResult {
             Self::ERROR_OUT_OF_HOST_MEMORY => "VK_ERROR_OUT_OF_HOST_MEMORY",
             Self::ERROR_OUT_OF_DEVICE_MEMORY => "VK_ERROR_OUT_OF_DEVICE_MEMORY",
             Self::ERROR_INITIALIZATION_FAILED => "VK_ERROR_INITIALIZATION_FAILED",
+            Self::ERROR_DEVICE_LOST => "VK_ERROR_DEVICE_LOST",
             Self::ERROR_LAYER_NOT_PRESENT => "VK_ERROR_LAYER_NOT_PRESENT",
             Self::ERROR_EXTENSION_NOT_PRESENT => "VK_ERROR_EXTENSION_NOT_PRESENT",
             Self::ERROR_FEATURE_NOT_PRESENT => "VK_ERROR_FEATURE_NOT_PRESENT",
@@ -643,6 +648,21 @@ pub enum VkStructureType {
     /// promoted from `VK_EXT_pipeline_creation_feedback`, extension 193). vulkan_core.h:
     /// `1000192000`.
     PipelineCreationFeedbackCreateInfo = 1_000_192_000,
+    /// `VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_NAME_INFO_EXT` (render rung GB: resource names).
+    /// `VK_EXT_debug_utils` is extension 129, so its block is `1000000000 + 128 * 1000`.
+    DebugUtilsObjectNameInfoExt = 1_000_128_000,
+    /// `VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT` (render rung GB: pass labels).
+    DebugUtilsLabelExt = 1_000_128_002,
+    /// `VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV` (render rung GB: the post-loss checkpoint read).
+    /// `VK_NV_device_diagnostic_checkpoints` is extension 207.
+    CheckpointDataNv = 1_000_206_000,
+    /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT` (render rung GB). `VK_EXT_device_fault`
+    /// is extension 342, so its block is `1000000000 + 341 * 1000`.
+    PhysicalDeviceFaultFeaturesExt = 1_000_341_000,
+    /// `VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT`.
+    DeviceFaultCountsExt = 1_000_341_001,
+    /// `VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT`.
+    DeviceFaultInfoExt = 1_000_341_002,
 }
 
 // ---------------------------------------------------------------------------
@@ -4219,3 +4239,225 @@ pub const VK_PIPELINE_STAGE_HOST_BIT: VkFlags = 0x0000_4000;
 /// `VK_ACCESS_HOST_READ_BIT` — a host read of device memory, the destination access of that
 /// dependency (OBS, `host_read.rs`).
 pub const VK_ACCESS_HOST_READ_BIT: VkFlags = 0x0000_2000;
+
+// ---------------------------------------------------------------------------
+// Render rung GB — GPU crash diagnostics: debug-utils labels and object names.
+// ---------------------------------------------------------------------------
+
+/// `VkObjectType::VK_OBJECT_TYPE_COMMAND_BUFFER` — the `objectType` of a command-buffer name.
+pub const VK_OBJECT_TYPE_COMMAND_BUFFER: i32 = 6;
+/// `VkObjectType::VK_OBJECT_TYPE_BUFFER`.
+pub const VK_OBJECT_TYPE_BUFFER: i32 = 9;
+/// `VkObjectType::VK_OBJECT_TYPE_IMAGE`.
+pub const VK_OBJECT_TYPE_IMAGE: i32 = 10;
+
+/// `VkDebugUtilsLabelEXT` — one command-buffer label region's name (render rung GB). `color` is
+/// all zero, which the spec defines as "no colour".
+#[repr(C)]
+pub struct VkDebugUtilsLabelExt {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    /// A NUL-terminated UTF-8 name; read only during the call.
+    pub p_label_name: *const c_char,
+    pub color: [f32; 4],
+}
+
+/// `VkDebugUtilsObjectNameInfoEXT` — the name a capture tool shows for one Vulkan object.
+#[repr(C)]
+pub struct VkDebugUtilsObjectNameInfoExt {
+    pub s_type: VkStructureType,
+    pub p_next: *const c_void,
+    /// `VkObjectType` (`VK_OBJECT_TYPE_*`).
+    pub object_type: i32,
+    /// The handle as a `u64`: a non-dispatchable handle's value, or a dispatchable handle's
+    /// pointer cast to an integer. Never NULL (`VUID-VkDebugUtilsObjectNameInfoEXT-objectType-02590`).
+    pub object_handle: u64,
+    /// A NUL-terminated UTF-8 name; read only during the call.
+    pub p_object_name: *const c_char,
+}
+
+const _: () = assert!(core::mem::size_of::<VkDebugUtilsLabelExt>() == 40);
+const _: () = assert!(core::mem::align_of::<VkDebugUtilsLabelExt>() == 8);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsLabelExt, p_label_name) == 16);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsLabelExt, color) == 24);
+const _: () = assert!(core::mem::size_of::<VkDebugUtilsObjectNameInfoExt>() == 40);
+const _: () = assert!(core::mem::align_of::<VkDebugUtilsObjectNameInfoExt>() == 8);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsObjectNameInfoExt, object_type) == 16);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsObjectNameInfoExt, object_handle) == 24);
+const _: () = assert!(core::mem::offset_of!(VkDebugUtilsObjectNameInfoExt, p_object_name) == 32);
+
+/// `PFN_vkCmdBeginDebugUtilsLabelEXT` — opens a label region in a command buffer.
+pub type PfnVkCmdBeginDebugUtilsLabelExt = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    p_label_info: *const VkDebugUtilsLabelExt,
+);
+
+/// `PFN_vkCmdEndDebugUtilsLabelEXT` — closes the innermost open label region.
+pub type PfnVkCmdEndDebugUtilsLabelExt = unsafe extern "system" fn(command_buffer: VkCommandBuffer);
+
+/// `PFN_vkSetDebugUtilsObjectNameEXT` — names one object for capture tools and validation text.
+pub type PfnVkSetDebugUtilsObjectNameExt = unsafe extern "system" fn(
+    device: VkDevice,
+    p_name_info: *const VkDebugUtilsObjectNameInfoExt,
+) -> i32;
+
+// --- Render rung GB — breadcrumbs: `VK_AMD_buffer_marker` and `VK_NV_device_diagnostic_checkpoints`. ---
+
+/// `VK_AMD_buffer_marker` device-extension name (render rung GB breadcrumbs).
+pub const VK_AMD_BUFFER_MARKER_EXTENSION_NAME: &core::ffi::CStr = c"VK_AMD_buffer_marker";
+/// `VK_NV_device_diagnostic_checkpoints` device-extension name (render rung GB checkpoints).
+pub const VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME: &core::ffi::CStr =
+    c"VK_NV_device_diagnostic_checkpoints";
+
+/// `VK_PIPELINE_STAGE_ALL_COMMANDS_BIT` — the source stage of GB's frame-close host-read barrier:
+/// a breadcrumb write is a transfer write performed at TOP_OF_PIPE or BOTTOM_OF_PIPE, which no
+/// narrower stage mask covers.
+pub const VK_PIPELINE_STAGE_ALL_COMMANDS_BIT: VkFlags = 0x0001_0000;
+
+/// `PFN_vkCmdWriteBufferMarkerAMD` — the **sync1** breadcrumb write: once every command before it
+/// reaches `pipeline_stage`, writes `marker` to `dst_buffer` at `dst_offset` (4-aligned). The
+/// sync2 variant is not used: it needs the `synchronization2` feature enabled, which this device
+/// does not enable.
+pub type PfnVkCmdWriteBufferMarkerAmd = unsafe extern "system" fn(
+    command_buffer: VkCommandBuffer,
+    // `pipeline_stage`: one `VkPipelineStageFlagBits` (TOP_OF_PIPE or BOTTOM_OF_PIPE here).
+    pipeline_stage: VkFlags,
+    dst_buffer: VkBuffer,
+    dst_offset: u64,
+    marker: u32,
+);
+
+/// `PFN_vkCmdSetCheckpointNV` — records an opaque pointer-sized checkpoint marker the driver
+/// reports, per pipeline stage, after a device loss. The pointer is never dereferenced by anyone.
+pub type PfnVkCmdSetCheckpointNv =
+    unsafe extern "system" fn(command_buffer: VkCommandBuffer, p_checkpoint_marker: *const c_void);
+
+/// `VkCheckpointDataNV` — one (stage, last checkpoint marker) pair of a lost queue.
+#[repr(C)]
+pub struct VkCheckpointDataNv {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    /// One `VkPipelineStageFlagBits`.
+    pub stage: VkFlags,
+    pub p_checkpoint_marker: *mut c_void,
+}
+
+const _: () = assert!(core::mem::size_of::<VkCheckpointDataNv>() == 32);
+const _: () = assert!(core::mem::align_of::<VkCheckpointDataNv>() == 8);
+const _: () = assert!(core::mem::offset_of!(VkCheckpointDataNv, stage) == 16);
+const _: () = assert!(core::mem::offset_of!(VkCheckpointDataNv, p_checkpoint_marker) == 24);
+
+/// `PFN_vkGetQueueCheckpointDataNV` — the **sync1** two-call read of a lost queue's checkpoints
+/// (`VUID-vkGetQueueCheckpointDataNV-queue-02025`: the device must be lost). The `2NV` variant
+/// needs `VK_KHR_synchronization2`, which this device does not enable.
+pub type PfnVkGetQueueCheckpointDataNv = unsafe extern "system" fn(
+    queue: VkQueue,
+    p_checkpoint_data_count: *mut u32,
+    p_checkpoint_data: *mut VkCheckpointDataNv,
+);
+
+// --- Render rung GB — the device-loss report: `VK_EXT_device_fault`. ---
+
+/// `VK_EXT_device_fault` device-extension name (render rung GB's fault piece). SDK 1.4.363 marks it
+/// promoted to `VK_KHR_device_fault` (a different API); the reference driver advertises the EXT.
+pub const VK_EXT_DEVICE_FAULT_EXTENSION_NAME: &core::ffi::CStr = c"VK_EXT_device_fault";
+
+/// `VK_MAX_DESCRIPTION_SIZE`.
+pub const VK_MAX_DESCRIPTION_SIZE: usize = 256;
+
+/// `VkPhysicalDeviceFaultFeaturesEXT` — chained into `vkGetPhysicalDeviceFeatures2` to READ and
+/// into `VkDeviceCreateInfo` to ENABLE the two fault features. Both bits are queried before either
+/// is requested: an iGPU here reports `deviceFault` without `deviceFaultVendorBinary`.
+#[repr(C)]
+pub struct VkPhysicalDeviceFaultFeaturesExt {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub device_fault: VkBool32,
+    pub device_fault_vendor_binary: VkBool32,
+}
+
+/// `VkDeviceFaultCountsEXT` — the count query's in/out struct.
+#[repr(C)]
+pub struct VkDeviceFaultCountsExt {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub address_info_count: u32,
+    pub vendor_info_count: u32,
+    /// `VkDeviceSize`.
+    pub vendor_binary_size: u64,
+}
+
+/// `VkDeviceFaultAddressInfoEXT` — one faulting (or instruction) address, with its precision.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkDeviceFaultAddressInfoExt {
+    /// `VkDeviceFaultAddressTypeEXT` (`VK_DEVICE_FAULT_ADDRESS_TYPE_*_EXT`).
+    pub address_type: i32,
+    /// `VkDeviceAddress`.
+    pub reported_address: u64,
+    /// `VkDeviceSize`: the address is exact to `[addr & !(precision - 1), addr | (precision - 1)]`.
+    pub address_precision: u64,
+}
+
+/// `VkDeviceFaultVendorInfoEXT` — one vendor-defined fault record.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkDeviceFaultVendorInfoExt {
+    pub description: [c_char; VK_MAX_DESCRIPTION_SIZE],
+    pub vendor_fault_code: u64,
+    pub vendor_fault_data: u64,
+}
+
+/// `VkDeviceFaultInfoEXT` — the fault query's output: the description and the caller's arrays.
+#[repr(C)]
+pub struct VkDeviceFaultInfoExt {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub description: [c_char; VK_MAX_DESCRIPTION_SIZE],
+    pub p_address_infos: *mut VkDeviceFaultAddressInfoExt,
+    pub p_vendor_infos: *mut VkDeviceFaultVendorInfoExt,
+    pub p_vendor_binary_data: *mut c_void,
+}
+
+/// `VkDeviceFaultVendorBinaryHeaderVersionOneEXT` — the 56-byte header every vendor binary starts
+/// with (vk.xml 1.4.363). The binary arrives as bytes with alignment 1, so this layout is decoded
+/// field by field with `from_le_bytes` (`gpu_crash::VendorBinaryHeader`), never referenced in
+/// place; the struct exists to pin the offsets.
+#[repr(C)]
+pub struct VkDeviceFaultVendorBinaryHeaderVersionOneExt {
+    pub header_size: u32,
+    /// `VkDeviceFaultVendorBinaryHeaderVersionEXT` (`1` = version one).
+    pub header_version: i32,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub driver_version: u32,
+    pub pipeline_cache_uuid: [u8; 16],
+    pub application_name_offset: u32,
+    pub application_version: u32,
+    pub engine_name_offset: u32,
+    pub engine_version: u32,
+    pub api_version: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFaultFeaturesExt>() == 24);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFaultFeaturesExt>() == 8);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultCountsExt>() == 32);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultCountsExt, vendor_binary_size) == 24);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultAddressInfoExt>() == 24);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultAddressInfoExt, reported_address) == 8);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultVendorInfoExt>() == 272);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultVendorInfoExt, vendor_fault_code) == 256);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultInfoExt>() == 296);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultInfoExt, p_address_infos) == 272);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultVendorBinaryHeaderVersionOneExt>() == 56);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultVendorBinaryHeaderVersionOneExt, pipeline_cache_uuid) == 20);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultVendorBinaryHeaderVersionOneExt, api_version) == 52);
+
+/// `PFN_vkGetDeviceFaultInfoEXT` — the two-call fault read: counts with a NULL `p_fault_info`,
+/// then the records. Legal only on a lost device (`VUID-vkGetDeviceFaultInfoEXT-device-07336`);
+/// `VK_INCOMPLETE` when the caller's arrays were smaller than the counts.
+pub type PfnVkGetDeviceFaultInfoExt = unsafe extern "system" fn(
+    device: VkDevice,
+    p_fault_counts: *mut VkDeviceFaultCountsExt,
+    p_fault_info: *mut VkDeviceFaultInfoExt,
+) -> i32;

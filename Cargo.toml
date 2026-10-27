@@ -113,7 +113,15 @@ proc-macro2 = "1.0.107"
 # same machine code). This is NOT `lto`: LTO over the Bevy dependency in
 # `bench_bevy_vs_boyko` would explode compile time, and LTO shifts the mean
 # rather than the variance â€” out of scope for X.E. See docs/BENCHMARKING.md.
-# The SHIPPED profile. Until 2026-09-04 no `[profile.release]` existed at all, so a
+# The SHIPPED CODEGEN profile. It is one of two build axes: this profile sets codegen only. What
+# the engine compiles in (log ceiling, profiling tier, GPU crash diagnostics) is the
+# `BOYKO_PROFILE` axis (`crates/boyko_diag/build.rs`), which `--release` does not set, and unset
+# means `dev`. So a plain `cargo build --release` is the shipped codegen around a DEV build: logs,
+# profiling zones and the GPU crash labels and breadcrumbs compiled in (armed Off until
+# `BOYKO_GPU_CRASH_DIAG` or the `GpuCrashDiag` resource arms them). The shipped game binary is
+# `cargo build --release` with `BOYKO_PROFILE=shipping`.
+#
+# Until 2026-09-04 no `[profile.release]` existed at all, so a
 # release build ran at cargo's defaults: opt-level 3, codegen-units 16, LTO OFF.
 # `lto = "fat"` was chosen on a measured matrix (5 configurations x 7 benchmarks,
 # 10 interleaved passes plus 12 rotated-order passes on a verified-idle machine;

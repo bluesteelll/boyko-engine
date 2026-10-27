@@ -3119,6 +3119,15 @@ impl Renderer<'_> {
             // whose targets were built with the NaN arming; `fi` is this frame's slot.
             unsafe { self.record_test_nan_inject(cmd, targets, fi) };
         }
+        // Render rung GB (G3): the TEST-ONLY hang pass, recorded iff declared (the forced-hang gate's
+        // armed frame); its funnel call opens its scope. `COMPILED_IN` first: no branch in `shipping`.
+        if crate::gpu_crash::GpuCrashDiagLevel::COMPILED_IN && let Some(pass) = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_frame_graph ran before record_gbuffer").test_gpu_hang {
+            self.record_graph_pass(pass, cmd, targets, scene, fi);
+            self.record_test_gpu_hang(cmd);
+        }
 
         // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass — recorded HERE, BEFORE
         // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition below. TAA is a
@@ -3256,6 +3265,10 @@ impl Renderer<'_> {
         // Render wave PX0: `ZONE_POST_PRESENT` brackets Pass C from the swapchain barrier through
         // `cmd_end_rendering`; the image dump, the readback copy and the present transition are
         // outside it.
+        // Render rung GB: the hand-recorded swapchain blit + present transition get their own scope.
+        if self.crumbs_armed() {
+            self.crumb_enter_host(cmd, super::super::gpu_crumbs::HostScope::PresentBlit);
+        }
         let present_zone = super::zone_arm::ZoneArm::from_scene(scene);
         // SAFETY: recording is open and no rendering scope is (the AA passes above closed
         // theirs); `ts` reset this frame's pool at the frame top and seals the slot at
@@ -3574,6 +3587,11 @@ impl Renderer<'_> {
         // that frame resets nothing, writes nothing, and its caller never reaches a readback.
         ts.finish();
 
+        // Render rung GB: close the last scope and the frame scope (and, with breadcrumbs, make the
+        // slot's markers host-visible) — the frame's last commands before its end.
+        if self.crumbs_armed() {
+            self.crumb_frame_close(cmd);
+        }
         // SAFETY: recording is open; ending it matches the `begin` above.
         let raw = unsafe { (self.fns.end_command_buffer)(cmd) };
         let result = VkResult::from_raw(raw);

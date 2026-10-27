@@ -49,6 +49,9 @@ pub mod command_witness;
 // Profiling rung 5a — the GPU zone recorder. Rung 7 finished replacing the three
 // per-harness collectors it was written against; `gpu_timing.rs` is deleted.
 pub mod gpu_zone;
+// Render rung GB: the chained per-pass scope (labels, breadcrumb markers, checkpoints) the three
+// barrier funnels and the host scopes enter, and the per-frame breadcrumb verification.
+mod gpu_crumbs;
 mod graph_bridge;
 mod passes;
 mod scene_types;
@@ -61,6 +64,7 @@ mod targets;
 pub mod transparent_depth;
 
 pub use frame_driver::{FRAME_GRAPH_CAPACITY, FrameGraphCapacity, FrameWriteToken, Renderer};
+pub use gpu_crumbs::{DeviceLostReport, VendorBinaryStatus};
 pub use frame_driver::{
     RECEIPT_CONFIG_KEYS, RECEIPT_CONFIG_LEN, RECEIPT_MAX_SINK_SLOTS, ReceiptCapture, ReceiptConfig,
 };
