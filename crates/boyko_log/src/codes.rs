@@ -1509,6 +1509,9 @@ mod tests {
             (b'W', 2104), // L7b -- textured material suppressed by motion vectors
             (b'W', 2105), // L7b -- present mode not advertised, fell back to fifo
             (b'W', 2106), // L7b -- an optional shadow chain's sets failed to build
+            // Render rung GB. Added in its review round 1: the rung flipped both GB rows and was
+            // verified with `--test code_registry` only -- the blind spot the note above names.
+            (b'W', 2107), // GB  -- a requested GPU crash-diagnostics piece is unavailable (five sites)
             (b'W', 2201), // L8a -- more lights than the GPU table holds
             (b'W', 2202), // L8a -- a bindless table exhausted its slots (two sites, one code)
             (b'E', 2203), // L8a -- a GPU dispatch failed with no error channel to report it
@@ -1534,6 +1537,7 @@ mod tests {
             (b'E', 3010), // L8b -- a diagnostic dump could not be written (five sites)
             (b'E', 3011), // A6  -- a panic escaped a host-owned ECS entry point, process aborting
             (b'W', 3012), // PX1a -- no PostPlugin composed, the runner derives the post settings
+            (b'E', 3013), // GB  -- a device loss was diagnosed, the GPU crash report follows
             (b'B', 9001), // L6  -- schedule cycle
             (b'B', 9002), // L6  -- set-hierarchy cycle
             (b'B', 9004), // L6  -- two ordered sets share a member
