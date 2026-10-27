@@ -41,6 +41,27 @@
 //! It also cannot claim the fixtures are *correct* — only that the compiler whose prose they pin is
 //! the compiler that is running. `trybuild` itself makes the byte-exactness claim.
 //!
+//! The `rust-src` gate below reads files, not hashes. It requires the two library files the corpus
+//! renders plus rustup's per-component record `lib/rustlib/manifest-rust-src`, while rustc renders a
+//! library file only when its hash matches the library it was built from. So a sysroot whose
+//! manifest was copied in from another toolchain together with that toolchain's source passes the
+//! gate and still prints the bare note, and a non-rustup sysroot that ships matching source without
+//! rustup's record reds although it renders. CI and the workstation both install through rustup.
+//!
+//! # The blessing environment has a second axis: `rust-src`
+//!
+//! The version string does not determine the prose on its own. rustc renders a source snippet for
+//! a span inside the standard library only when the library's source — rustup's `rust-src`
+//! component, installed for the running toolchain — is present; without it, it prints a bare
+//! `= note: the failure occurred here` in place of the snippet. Fifteen fixtures pin such a
+//! `$RUST/core/src/...` snippet, so one compiler blesses two different texts depending on a
+//! component that `rustc --version` does not show. MEASURED 2026-10-27, on a workstation whose
+//! 1.98.1 toolchain had been installed without the component: the version freeze was green, all
+//! fifteen fixtures were red on that one difference, and `trybuild`'s report suggested
+//! `TRYBUILD=overwrite` — which would have blessed the no-source text that every CI job running the
+//! corpus rejects, since each of them declares `components: rust-src`.
+//! [`the_blessing_sysroot_carries_rust_src`] names that cause before anyone reaches for a re-bless.
+//!
 //! # When this fires
 //!
 //! The corpus is no longer certified. Re-bless and commit the diff **deliberately**, reviewing it
@@ -52,7 +73,12 @@
 //! ```
 //!
 //! then update [`BLESSED_RUSTC`] in the same commit.
+//!
+//! If [`the_blessing_sysroot_carries_rust_src`] is the test that fires, do **not** re-bless: the
+//! committed corpus is the text a sysroot with the library source renders. Install the component
+//! (`rustup component add rust-src --toolchain <toolchain>`) and re-run.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The exact `rustc --version` string the committed `.stderr` corpus was blessed against.
@@ -92,6 +118,12 @@ use std::process::Command;
 /// `anyof_arm_option_rejected` gained a rustc-rendered `core/src/option.rs` definition-site block
 /// restating a bound that was already asserted, unchanged, two lines below. No fixture lost or
 /// gained an `error[...]` line; no changed line carried engine content.
+///
+/// That flip is exactly the rendering difference the `rust-src` component controls (see
+/// [`the_blessing_sysroot_carries_rust_src`]). Which of the two moved at KE16 — the compiler
+/// version, or the blessing sysroot's `rust-src` state — is not established: neither the rung-11
+/// nor the KE16 sysroot's components were recorded, and 1.97.1 was never run with the source
+/// installed.
 const BLESSED_RUSTC: &str = "rustc 1.98.1 (48a229cea 2026-09-01)";
 
 /// Fixtures whose bytes this freeze speaks for — a lower bound, MEASURED at rung 11.
@@ -381,5 +413,124 @@ fn every_trybuild_glob_resolves_to_a_fixture_that_exists() {
          beside it never shown to a compiler.\n\n{}\n",
         violations.len(),
         violations.join("\n")
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// The blessing environment's second axis: the library source rustc renders snippets from
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/// What a sysroot needs before rustc renders the corpus's standard-library snippets, relative to
+/// the sysroot: the two library files those `$RUST/core/src/...` snippets come from, and rustup's
+/// record that the `rust-src` component was installed into THIS toolchain.
+///
+/// The record is not decoration. rustc renders a library file only when its hash matches the
+/// library it was built from, so a `src` tree copied or junctioned in from another toolchain
+/// resolves the path and still prints the bare note — MEASURED 2026-10-27: rustc 1.98.1 given
+/// 1.99.1's library source pointed its `-->` line into that source's `core/src/panic.rs` and then
+/// printed `= note: the failure occurred here`. The two files alone would call that sysroot
+/// complete; the per-component manifest that `rustup component add` writes does not come with
+/// them.
+const RUST_SRC_PROBES: [&str; 3] = [
+    "lib/rustlib/src/rust/library/core/src/panic.rs",
+    "lib/rustlib/src/rust/library/core/src/option.rs",
+    "lib/rustlib/manifest-rust-src",
+];
+
+/// The [`RUST_SRC_PROBES`] that `sysroot` lacks, as absolute paths, in probe order. Empty means
+/// the sysroot carries the library source (within the limit the module docs name).
+fn rust_src_missing(sysroot: &Path) -> Vec<PathBuf> {
+    RUST_SRC_PROBES
+        .iter()
+        .map(|rel| sysroot.join(rel))
+        .filter(|path| !path.is_file())
+        .collect()
+}
+
+/// **The `rust-src` freeze.** The running toolchain carries the standard library's source, the
+/// half of the blessing environment that [`BLESSED_RUSTC`] cannot see.
+///
+/// Fifteen fixtures under `crates/boyko_ecs/tests/` — ten in `enable_filter_compile_fail`, one in
+/// `option_anyof_compile_fail`, four in `query_change_detection_compile_fail` — pin a rustc
+/// snippet from `core/src/panic.rs` or `core/src/option.rs`. Without the source, the same rustc
+/// prints a bare note there, those three targets red on that line alone, and `trybuild` suggests
+/// `TRYBUILD=overwrite`. This test reds first and names the component, so the red reads as a
+/// machine gap rather than as drift.
+///
+/// It reads the sysroot of the `rustc` on `PATH`, the same binary the version freeze reads.
+#[test]
+fn the_blessing_sysroot_carries_rust_src() {
+    let out = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("invariant: rustc is on PATH for any tree that just compiled this test");
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    assert!(
+        out.status.success() && sysroot.is_dir(),
+        "`rustc --print sysroot` did not name a directory (status {}, stdout {}); this gate \
+         cannot read the environment the corpus was blessed in.",
+        out.status,
+        sysroot.display()
+    );
+
+    let missing = rust_src_missing(&sysroot);
+    // Under rustup the sysroot directory IS the toolchain's name, which is what the fix needs.
+    let toolchain = sysroot.file_name().map_or_else(
+        || sysroot.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let missing_list: Vec<String> = missing
+        .iter()
+        .map(|path| format!("    {}", path.display()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "\n\
+         The running toolchain lacks `rust-src`, the standard library's source.\n\
+         \n  toolchain: {toolchain}\n  sysroot:   {}\n  missing:\n{}\n\n\
+         rustc renders a source snippet for a span inside the standard library only when this \
+         component is installed for the toolchain that is running; without it, it prints \
+         `= note: the failure occurred here` in place of the snippet. Fifteen `.stderr` fixtures \
+         in `enable_filter_compile_fail`, `option_anyof_compile_fail` and \
+         `query_change_detection_compile_fail` (crates/boyko_ecs/tests/) carry such a \
+         `$RUST/core/src/...` snippet, so on this toolchain those three targets red on that \
+         snippet alone. The committed text is the one CI produces: every CI job that runs them \
+         declares `components: rust-src` (see the comment above the `test` job in \
+         .github/workflows/ci.yml).\n\n\
+         Fix: rustup component add rust-src --toolchain {toolchain}\n\n\
+         Do NOT re-bless with `TRYBUILD=overwrite`. That would pin the no-source rendering, \
+         which CI then rejects. A `src` directory copied or linked from ANOTHER toolchain does \
+         not help either: rustc refuses library source whose hash is not its own.",
+        sysroot.display(),
+        missing_list.join("\n")
+    );
+}
+
+/// Non-vacuity for [`the_blessing_sysroot_carries_rust_src`]: on a sysroot that holds nothing,
+/// the probe reports every entry it checks.
+///
+/// A predicate that stopped looking would turn the freeze above into a green that certifies
+/// nothing — the failure this file exists to close. An empty directory is the sysroot with no
+/// `rust-src` at all, so every probe must come back, in order.
+#[test]
+fn the_rust_src_probe_reports_a_sysroot_without_it() {
+    let empty = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rust_src_probe_empty_sysroot");
+    std::fs::create_dir_all(&empty).expect("invariant: the target's tmp dir is writable");
+    let held = std::fs::read_dir(&empty)
+        .expect("invariant: just created")
+        .count();
+    assert_eq!(
+        held,
+        0,
+        "{} must be empty for this control to mean anything; it holds {held} entr(y/ies).",
+        empty.display()
+    );
+
+    let expected: Vec<PathBuf> = RUST_SRC_PROBES.iter().map(|rel| empty.join(rel)).collect();
+    assert_eq!(
+        rust_src_missing(&empty),
+        expected,
+        "the `rust-src` probe did not report every entry missing on an empty sysroot, so a green \
+         from `the_blessing_sysroot_carries_rust_src` would not mean the source is there."
     );
 }
