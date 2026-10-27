@@ -3119,6 +3119,15 @@ impl Renderer<'_> {
             // whose targets were built with the NaN arming; `fi` is this frame's slot.
             unsafe { self.record_test_nan_inject(cmd, targets, fi) };
         }
+        // Render rung GB (G3): the TEST-ONLY hang pass, recorded iff declared (the armed frame of
+        // the opted-in forced-hang gate, never a shipped run). Its funnel call opens its scope.
+        if let Some(pass) = self
+            .gbuffer_pass_plan
+            .as_ref()
+            .expect("invariant: declare_frame_graph ran before record_gbuffer").test_gpu_hang {
+            self.record_graph_pass(pass, cmd, targets, scene, fi);
+            self.record_test_gpu_hang(cmd);
+        }
 
         // Anti-aliasing Stage 4 (TAA W5): the temporal-resolve pass — recorded HERE, BEFORE
         // `present_sample`'s `lit` GENERAL→SHADER_READ_ONLY_OPTIMAL transition below. TAA is a

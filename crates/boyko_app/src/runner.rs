@@ -1316,6 +1316,18 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
     {
         host.renderer.arm_nan_inject(crate::test_force::INJECT_NAN_LIT_FRAME);
     }
+    // Render rung GB (G3): the test-only forced hang — TWO keys, both required: the
+    // `inject_gpu_hang` force key AND the `BOYKO_GPU_HANG_OPT_IN` value, because a forced device
+    // loss resets the display driver; `arm_gpu_hang` itself refuses unless breadcrumbs armed.
+    if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN
+        && app
+            .world()
+            .try_resource::<crate::test_force::TestForce>()
+            .is_some_and(|f| f.contains(crate::test_force::TestForceKey::InjectGpuHang))
+        && crate::gpu_crash::gpu_hang_opted_in()
+    {
+        let _armed = host.renderer.arm_gpu_hang(crate::test_force::INJECT_GPU_HANG_FRAME);
+    }
     // Automated-run frame cap (the `BOYKO_WIN_HIDDEN` companion, and the app-level
     // twin of `window_present_gbuffer`'s own `BOYKO_WINDOW_FRAMES`): `BOYKO_WINDOW_FRAMES=<n>`
     // bounds this loop to `n` iterations, then exits cleanly. Without it an
@@ -1523,6 +1535,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             Ok(t) => t,
             Err(e) => {
                 crate::diag::report_terminal_device_error("frame fence wait", &e);
+                if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN {
+                    crate::diag::report_gpu_crash_if_device_lost("frame fence wait", &host.renderer, ctx, &e);
+                }
                 return;
             }
         };
@@ -3251,6 +3266,9 @@ fn frame_loop(app: &mut App, host: &mut WindowHost, ctx: &'static VulkanContext)
             // failure (`frame_driver` contract) — exit and tear down.
             Err(e) => {
                 crate::diag::report_terminal_device_error("render", &e);
+                if boyko_rhi_vulkan::gpu_crash::GpuCrashDiagLevel::COMPILED_IN {
+                    crate::diag::report_gpu_crash_if_device_lost("render", &host.renderer, ctx, &e);
+                }
                 return;
             }
         }

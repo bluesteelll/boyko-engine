@@ -97,6 +97,65 @@ pub(crate) fn finish_run(app: &mut boyko_ecs::prelude::App, counts: CrumbLedger)
     }
 }
 
+/// Where the device-loss report writes the `VK_EXT_device_fault` vendor binary; the current
+/// directory when unset.
+pub const GPU_CRASH_DIR_ENV: &str = "BOYKO_GPU_CRASH_DIR";
+
+/// The explicit opt-in the forced-hang gate (G3) needs beside the `inject_gpu_hang` force key:
+/// a forced device loss resets the display driver, so a key alone — which a test sweep could
+/// carry — never arms it.
+pub const GPU_HANG_OPT_IN_ENV: &str = "BOYKO_GPU_HANG_OPT_IN";
+/// [`GPU_HANG_OPT_IN_ENV`]'s one accepted value.
+pub const GPU_HANG_OPT_IN_VALUE: &str = "i-accept-a-display-reset";
+
+/// `true` iff [`GPU_HANG_OPT_IN_ENV`] holds exactly [`GPU_HANG_OPT_IN_VALUE`].
+pub fn gpu_hang_opted_in() -> bool {
+    std::env::var(GPU_HANG_OPT_IN_ENV).is_ok_and(|v| v == GPU_HANG_OPT_IN_VALUE)
+}
+
+/// The vendor-binary outcome text's bound.
+const OUTCOME_BYTES: usize = 192;
+
+/// Writes the device-loss report's vendor binary to `$BOYKO_GPU_CRASH_DIR` (or the current
+/// directory) as `boyko-gpu-fault-<unix_s>-<pid>.bin`, and returns what the report prints after
+/// `->`: the path, or why it was not written (`boyko-E3010` for a write failure).
+#[cfg(any(windows, test))]
+#[cold]
+#[inline(never)]
+pub(crate) fn write_vendor_binary(bytes: &[u8]) -> boyko_log::DspBuf<OUTCOME_BYTES> {
+    let dir = std::env::var_os(GPU_CRASH_DIR_ENV).map_or_else(|| std::path::PathBuf::from("."), std::path::PathBuf::from);
+    write_vendor_binary_in(&dir, bytes)
+}
+
+/// [`write_vendor_binary`] into `dir`.
+#[cfg(any(windows, test))]
+pub(crate) fn write_vendor_binary_in(dir: &std::path::Path, bytes: &[u8]) -> boyko_log::DspBuf<OUTCOME_BYTES> {
+    use core::fmt::Write as _;
+    let mut out = boyko_log::DspBuf::<OUTCOME_BYTES>::new();
+    if bytes.is_empty() {
+        let _ = out.write_str("not written: no binary");
+        return out;
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mut name = boyko_log::DspBuf::<64>::new();
+    let _ = write!(&mut name, "boyko-gpu-fault-{secs}-{}.bin", std::process::id());
+    let path = dir.join(name.as_str());
+    match std::fs::write(&path, bytes) {
+        Ok(()) => {
+            let _ = write!(&mut out, "{}", path.display());
+        }
+        Err(e) => {
+            let shown = path.to_string_lossy();
+            let err = crate::diag::debug_into(&e.kind());
+            crate::diag::report_dump_write_failed("gpu fault vendor binary", &shown, err.as_str());
+            let _ = write!(&mut out, "not written: {} (boyko-E3010)", err.as_str());
+        }
+    }
+    out
+}
+
 /// The dev seam's variable.
 pub const GPU_CRASH_DIAG_ENV: &str = "BOYKO_GPU_CRASH_DIAG";
 
@@ -146,6 +205,33 @@ mod tests {
         assert_eq!(lines[..4], ["level = markers", "pieces = 7", "frame_pieces = 6", "frames_checked = 10"], "{t}");
         assert_eq!(lines.last(), Some(&"last_serial = 12"), "{t}");
         assert_eq!(lines.len(), 12);
+    }
+
+    /// The vendor binary lands in the named directory; an unwritable one is `boyko-E3010` with
+    /// the kind named, and the report line says it was not written.
+    #[test]
+    fn the_vendor_binary_writer_reports_a_failed_write() {
+        use boyko_log::probe::{last_message, observe_lock, watch, watched};
+        let dir = std::env::temp_dir().join(format!("boyko_gb_vendor_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("test setup: temp dir");
+        let ok = super::write_vendor_binary_in(&dir, b"vendor");
+        let written = std::path::PathBuf::from(ok.as_str());
+        assert_eq!(std::fs::read(&written).expect("the binary was written"), b"vendor");
+        assert!(written.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("boyko-gpu-fault-")));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let _lock = observe_lock();
+        boyko_log::probe::arm::<boyko_log::Host>();
+        watch(b'E', boyko_log::codes::E3010.number());
+        // A directory under a FILE cannot exist, on every platform.
+        let file = std::env::temp_dir().join(format!("boyko_gb_vendor_file_{}", std::process::id()));
+        std::fs::write(&file, b"x").expect("test setup: a plain file");
+        let bad = super::write_vendor_binary_in(&file.join("sub"), b"vendor");
+        let _ = std::fs::remove_file(&file);
+        assert!(bad.as_str().starts_with("not written: "), "{}", bad.as_str());
+        assert_eq!(watched(), 1, "a failed write is one boyko-E3010");
+        assert!(last_message().contains("gpu fault vendor binary"), "{}", last_message());
+        assert_eq!(super::write_vendor_binary_in(&dir, b"").as_str(), "not written: no binary");
     }
 
     #[test]

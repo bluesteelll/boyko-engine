@@ -1,9 +1,11 @@
 //! The host's terminal-exit reporters — the records that must survive a run nobody asked to log.
 //!
-//! Four of them today: `E3002` (a boot stage failed), `E3003` (a terminal device error),
-//! `E3004` (no windowing arm on this platform) and `E3011` (a panic escaped an ECS entry point
-//! the windowed host owns). The argument below was written for the first three and the fourth is
-//! an instance of it, not an exception — its next statement is `std::process::abort()`.
+//! Five of them today: `E3002` (a boot stage failed), `E3003` (a terminal device error),
+//! `E3004` (no windowing arm on this platform), `E3011` (a panic escaped an ECS entry point
+//! the windowed host owns) and `E3013` (the GPU crash report after a device loss, render rung GB).
+//! The argument below was written for the first three and the last two are instances of it, not
+//! exceptions — `E3011`'s next statement is `std::process::abort()`, and `E3013` follows `E3003`
+//! on the frame loop's way out.
 //!
 //! # Why this module exists at all, measured rather than assumed *(L8b)*
 //!
@@ -168,6 +170,50 @@ pub(crate) fn report_terminal_device_error<E: core::fmt::Debug>(site: &str, err:
     if flush() == FlushResult::NoConsumer {
         eprintln!("boyko-E3003: terminal device error at {site} ({e}) - exiting");
     }
+}
+
+/// One line of the GPU crash report — `boyko-E3013` (render rung GB).
+///
+/// A terminal-exit reporter: it follows `E3003` on the frame loop's way out, so it uses this
+/// module's emit → `flush()` → `eprintln!` on `NoConsumer` shape — with `BOYKO_LOG` unset (the
+/// default) the report would otherwise say nothing at the one moment it exists for. One record
+/// per line (`RatePolicy::Every`): the report is up to 16 bounded lines.
+#[cfg(any(windows, test))]
+#[cold]
+#[inline(never)]
+pub(crate) fn report_gpu_crash_line(line: &str) {
+    boyko_log::error!(boyko_log::App, codes::E3013, "{}", line);
+    if flush() == FlushResult::NoConsumer {
+        eprintln!("boyko-E3013: {line}");
+    }
+}
+
+/// Render rung GB: when `err` is `VK_ERROR_DEVICE_LOST`, reads and prints the GPU crash report
+/// (`boyko-E3013`) — the breadcrumbs' in-flight set, the checkpoints, the `VK_EXT_device_fault`
+/// record — and writes the vendor binary next to it. Any other error returns at once; `E3003` has
+/// already reported it. Called by the frame loop's two terminal sites, right after `E3003`.
+#[cfg(windows)]
+#[cold]
+#[inline(never)]
+pub(crate) fn report_gpu_crash_if_device_lost(
+    site: &str,
+    renderer: &boyko_rhi_vulkan::swapchain::Renderer<'_>,
+    ctx: &boyko_rhi_vulkan::device::VulkanContext,
+    err: &boyko_rhi_vulkan::swapchain::SwapchainError,
+) {
+    use boyko_rhi_vulkan::ffi::VkResult;
+    let boyko_rhi_vulkan::swapchain::SwapchainError::VkError(_, result) = err else {
+        return;
+    };
+    if *result != VkResult::ERROR_DEVICE_LOST {
+        return;
+    }
+    // SAFETY: the device reported `VK_ERROR_DEVICE_LOST` (matched just above), the one state the
+    // report's checkpoint and fault queries are legal in; `ctx` is the runner's singleton, the
+    // context the renderer was created on.
+    let report = unsafe { renderer.device_lost_report(ctx) };
+    let outcome = crate::gpu_crash::write_vendor_binary(report.vendor_binary());
+    report.write_lines(site, *result, outcome.as_str(), report_gpu_crash_line);
 }
 
 /// Report that this platform has no windowing arm — `boyko-E3004`.
@@ -501,6 +547,19 @@ mod tests {
         let msg = last_message();
         assert!(msg.contains("frame fence wait"), "{msg}");
         assert!(msg.contains("DeviceLost"), "{msg}");
+    }
+
+    /// Render rung GB: `boyko-E3013` is one record per report line, every line reaches the
+    /// record, and nothing is latched (a second report is a second loss).
+    #[test]
+    fn e3013_reports_every_line_of_the_crash_report() {
+        let _lock = observe_lock();
+        arm_app();
+        watch(b'E', codes::E3013.number());
+        report_gpu_crash_line("device lost at render (VK_ERROR_DEVICE_LOST); GPU crash report: level=markers");
+        report_gpu_crash_line("slot 1 serial 9 declarator deferred passes 6: in flight: #3 ssao_atrous#1");
+        assert_eq!(watched(), 2, "one record per line");
+        assert!(last_message().contains("ssao_atrous#1"), "the line must reach the record: {}", last_message());
     }
 
     #[test]

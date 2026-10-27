@@ -95,6 +95,14 @@ impl HostScope {
             Self::PresentBlit => "present_blit",
         }
     }
+
+    /// Every host scope, in id order.
+    pub(crate) const ALL: [Self; 3] = [Self::Fxaa, Self::Smaa, Self::PresentBlit];
+
+    /// The host scope `id` names, if it names one (the device-loss report).
+    pub(crate) fn from_id(id: u16) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.id() == id)
+    }
 }
 
 /// The declarators by `ResolvedRenderPathGpu::path` discriminant.
@@ -169,6 +177,18 @@ pub(crate) enum CheckpointKind {
 #[inline]
 pub(crate) const fn encode_checkpoint(serial: u32, kind: CheckpointKind, position: u16) -> u64 {
     ((serial as u64) << 32) | ((kind as u64) << 16) | position as u64
+}
+
+/// Unpacks [`encode_checkpoint`]; `None` for a payload GB never wrote (the device-loss report).
+pub(crate) fn decode_checkpoint(payload: u64) -> Option<(u32, CheckpointKind, u16)> {
+    let kind = match (payload >> 16) & 0xFFFF {
+        0 => CheckpointKind::Begin,
+        1 => CheckpointKind::End,
+        2 => CheckpointKind::FrameBegin,
+        3 => CheckpointKind::FrameEnd,
+        _ => return None,
+    };
+    Some(((payload >> 32) as u32, kind, (payload & 0xFFFF) as u16))
 }
 
 /// A scope's state in a region read back for serial `S`.
@@ -962,6 +982,595 @@ impl Renderer<'_> {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The device-loss report (render rung GB, D8 / D9).
+// ---------------------------------------------------------------------------------------------
+
+/// Checkpoint records read back per loss; NVIDIA reports one per pipeline stage, far below this.
+const CHECKPOINT_READ_CAP: usize = 16;
+/// Address and vendor records read back per fault.
+const FAULT_RECORD_CAP: usize = 16;
+/// Address lines / vendor-record lines the report prints (each record line is bounded).
+const FAULT_ADDRESS_LINES: usize = 4;
+const FAULT_VENDOR_LINES: usize = 3;
+/// In-flight scopes one slot line lists by name.
+const IN_FLIGHT_NAMED: usize = 4;
+/// One report line's bound, in bytes.
+pub(crate) const REPORT_LINE_BYTES: usize = 256;
+
+/// One slot's frame, copied out of the shadow and the marker region at report time.
+#[derive(Clone, Copy)]
+struct SlotSnapshot {
+    fi: usize,
+    serial: u32,
+    declarator: u8,
+    pass_count: u16,
+    cursor: u16,
+    overflow: u16,
+    /// `Some` when the markers piece is armed (the region read through the mapping).
+    region: Option<[u32; REGION_WORDS]>,
+    scope_ids: [u16; CRUMB_SCOPE_CAP],
+    names: [&'static str; CRUMB_SCOPE_CAP],
+}
+
+impl SlotSnapshot {
+    fn recorded(&self) -> usize {
+        (self.cursor as usize).min(CRUMB_SCOPE_CAP)
+    }
+
+    /// The name of record position `pos`, with its `#ordinal` among same-named passes of the frame
+    /// when the name repeats (`ssao_atrous#2` is the third `ssao_atrous`).
+    fn write_scope<W: core::fmt::Write>(&self, out: &mut W, pos: usize) -> core::fmt::Result {
+        let id = self.scope_ids[pos];
+        if let Some(h) = HostScope::from_id(id) {
+            return write!(out, "#{pos} {}", h.name());
+        }
+        let p = id as usize;
+        let Some(&name) = self.names.get(p) else {
+            return write!(out, "#{pos} pass{id}");
+        };
+        let declared = (self.pass_count as usize).min(CRUMB_SCOPE_CAP);
+        let total = self.names[..declared].iter().filter(|n| **n == name).count();
+        if total > 1 {
+            let ordinal = self.names[..p.min(declared)].iter().filter(|n| **n == name).count();
+            write!(out, "#{pos} {name}#{ordinal}")
+        } else {
+            write!(out, "#{pos} {name}")
+        }
+    }
+}
+
+/// The checkpoint half of the report.
+// One value per report, built once on the terminal path: the 272-byte variant costs nothing, and
+// boxing it would add an allocation for no benefit.
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Copy)]
+enum CheckpointRead {
+    /// The level did not ask for checkpoints.
+    NotRequested,
+    /// The level asked, the device lacks them (`boyko-W2107` said so at boot).
+    Unavailable,
+    /// `(stage, payload)` per record, `total` as the driver counted.
+    Read { total: u32, count: usize, entries: [(VkFlags, u64); CHECKPOINT_READ_CAP] },
+}
+
+/// What the vendor binary capture did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum VendorBinaryStatus {
+    /// The fault piece is not armed, or the device does not support `deviceFaultVendorBinary`.
+    Unsupported,
+    /// The driver reported a zero-sized binary.
+    Empty,
+    /// The host could not allocate the reported size (`try_reserve_exact` failed).
+    AllocationFailed,
+    /// Captured; the bytes are [`DeviceLostReport::vendor_binary`].
+    Captured,
+}
+
+/// The fault half of the report.
+enum FaultRead {
+    NotRequested,
+    Unavailable,
+    QueryFailed(VkResult),
+    Read(Box<FaultRecords>),
+}
+
+/// `vkGetDeviceFaultInfoEXT`'s output, bounded.
+struct FaultRecords {
+    description: [core::ffi::c_char; VK_MAX_DESCRIPTION_SIZE],
+    address_total: u32,
+    addresses: [VkDeviceFaultAddressInfoExt; FAULT_RECORD_CAP],
+    address_count: usize,
+    vendor_total: u32,
+    vendors: [VkDeviceFaultVendorInfoExt; FAULT_RECORD_CAP],
+    vendor_count: usize,
+    binary_size: u64,
+}
+
+/// Render rung GB: everything the renderer can say after `VK_ERROR_DEVICE_LOST` — both slots'
+/// breadcrumbs with their pass names, the NVIDIA checkpoints and the `VK_EXT_device_fault` report
+/// with its vendor binary. Built by [`Renderer::device_lost_report`]; rendered into bounded lines
+/// by [`Self::write_lines`]. Marker contents after a loss are undefined by the spec, so every
+/// line is a hint, and the report says so.
+pub struct DeviceLostReport {
+    level: GpuCrashDiagLevel,
+    pieces: u8,
+    frame_pieces: u8,
+    slots: [Option<SlotSnapshot>; FRAMES_IN_FLIGHT],
+    checkpoints: CheckpointRead,
+    fault: FaultRead,
+    vendor_binary: Vec<u8>,
+    vendor_status: VendorBinaryStatus,
+}
+
+/// The `VkPipelineStageFlagBits` name a checkpoint reports, or `None` for a combination.
+fn stage_name(stage: VkFlags) -> Option<&'static str> {
+    Some(match stage {
+        0x0000_0001 => "TOP_OF_PIPE",
+        0x0000_0002 => "DRAW_INDIRECT",
+        0x0000_0004 => "VERTEX_INPUT",
+        0x0000_0008 => "VERTEX_SHADER",
+        0x0000_0080 => "FRAGMENT_SHADER",
+        0x0000_0100 => "EARLY_FRAGMENT_TESTS",
+        0x0000_0200 => "LATE_FRAGMENT_TESTS",
+        0x0000_0400 => "COLOR_ATTACHMENT_OUTPUT",
+        0x0000_0800 => "COMPUTE_SHADER",
+        0x0000_1000 => "TRANSFER",
+        0x0000_2000 => "BOTTOM_OF_PIPE",
+        0x0000_4000 => "HOST",
+        0x0001_0000 => "ALL_COMMANDS",
+        _ => return None,
+    })
+}
+
+/// The `VkDeviceFaultAddressTypeEXT` name.
+fn address_type_name(t: i32) -> &'static str {
+    match t {
+        0 => "none",
+        1 => "read-invalid",
+        2 => "write-invalid",
+        3 => "execute-invalid",
+        4 => "ip-unknown",
+        5 => "ip-invalid",
+        6 => "ip-fault",
+        _ => "unknown-type",
+    }
+}
+
+/// The NUL-terminated `c_char` array as text, lossy, without allocating.
+fn c_text(chars: &[core::ffi::c_char]) -> &str {
+    // SAFETY: `c_char` is `i8` or `u8`, both one byte with alignment 1, so reinterpreting the
+    // slice's bytes is sound; the borrow keeps them alive.
+    let bytes = unsafe { core::slice::from_raw_parts(chars.as_ptr().cast::<u8>(), chars.len()) };
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    match core::str::from_utf8(&bytes[..end]) {
+        Ok(s) => s,
+        Err(e) => core::str::from_utf8(&bytes[..e.valid_up_to()]).unwrap_or(""),
+    }
+}
+
+impl DeviceLostReport {
+    /// The vendor binary the fault query returned (empty unless [`Self::vendor_status`] is
+    /// `Captured`). The host crate writes it to a file; its first 56 bytes are a
+    /// `VkDeviceFaultVendorBinaryHeaderVersionOneEXT`, decoded by
+    /// [`VendorBinaryHeader::decode`](crate::gpu_crash::VendorBinaryHeader::decode).
+    pub fn vendor_binary(&self) -> &[u8] {
+        &self.vendor_binary
+    }
+
+    /// What the vendor binary capture did.
+    pub fn vendor_status(&self) -> VendorBinaryStatus {
+        self.vendor_status
+    }
+
+    /// Renders the report, one bounded line (≤ 256 bytes, at most 16 lines) per `emit` call.
+    ///
+    /// `site` and `result` say where the loss surfaced; `binary_outcome` is the host's account of
+    /// the vendor binary (the file path it wrote, or why it did not) and is printed only when a
+    /// binary was captured.
+    pub fn write_lines(&self, site: &str, result: VkResult, binary_outcome: &str, mut emit: impl FnMut(&str)) {
+        use core::fmt::Write as _;
+        let mut line = boyko_log::DspBuf::<REPORT_LINE_BYTES>::new();
+        macro_rules! out {
+            ($($arg:tt)*) => {{
+                line.clear();
+                let _ = write!(&mut line, $($arg)*);
+                emit(line.as_str());
+            }};
+        }
+
+        let mut pieces = boyko_log::DspBuf::<64>::new();
+        let _ = crate::gpu_crash::write_pieces(&mut pieces, self.pieces);
+        out!(
+            "device lost at {site} ({result:?}); GPU crash report: level={} pieces={} profile={}",
+            self.level.name(),
+            pieces.as_str(),
+            boyko_diag::profile::PROFILE_NAME
+        );
+
+        let markers = self.frame_pieces & piece::MARKERS != 0;
+        let mut order: [Option<&SlotSnapshot>; FRAMES_IN_FLIGHT] = [None; FRAMES_IN_FLIGHT];
+        for (o, s) in order.iter_mut().zip(self.slots.iter()) {
+            *o = s.as_ref();
+        }
+        // Newest serial first (serials never take 0 and wrap after 2^32 armed frames).
+        order.sort_by(|a, b| b.map(|s| s.serial).cmp(&a.map(|s| s.serial)));
+        let mut any_in_flight = false;
+        let mut any_armed = false;
+        if markers {
+            for snap in order.iter().flatten() {
+                any_armed = true;
+                any_in_flight |= self.write_slot(snap, &mut line, &mut emit);
+            }
+            for (fi, s) in self.slots.iter().enumerate() {
+                if s.is_none() {
+                    out!("slot {fi}: no armed frame recorded");
+                }
+            }
+            if any_armed && !any_in_flight {
+                out!(
+                    "no GB scope was in flight in either slot: the loss is likely outside the frame command \
+                     buffer (an upload or readback submission on the same queue)"
+                );
+            }
+        } else {
+            out!("breadcrumbs not armed (BOYKO_GPU_CRASH_DIAG=markers arms them)");
+        }
+
+        match &self.checkpoints {
+            CheckpointRead::NotRequested => {
+                out!("checkpoints not armed (BOYKO_GPU_CRASH_DIAG=checkpoints arms them; NVIDIA only)")
+            }
+            CheckpointRead::Unavailable => out!("checkpoints unavailable on this device"),
+            CheckpointRead::Read { total, count, entries } => {
+                line.clear();
+                let _ = write!(&mut line, "checkpoints ({total}):");
+                for (i, &(stage, payload)) in entries[..*count].iter().enumerate() {
+                    let _ = if i > 0 { line.write_str(";") } else { Ok(()) };
+                    let _ = match stage_name(stage) {
+                        Some(n) => write!(&mut line, " {n} ->"),
+                        None => write!(&mut line, " 0x{stage:x} ->"),
+                    };
+                    match decode_checkpoint(payload) {
+                        Some((serial, kind, pos)) => {
+                            let k = match kind {
+                                CheckpointKind::Begin => "begin",
+                                CheckpointKind::End => "end",
+                                CheckpointKind::FrameBegin => "frame-begin",
+                                CheckpointKind::FrameEnd => "frame-end",
+                            };
+                            let _ = write!(&mut line, " serial {serial} {k}");
+                            if matches!(kind, CheckpointKind::Begin | CheckpointKind::End) {
+                                let snap = self.slots.iter().flatten().find(|s| s.serial == serial);
+                                let _ = match snap {
+                                    Some(s) if (pos as usize) < s.recorded() => {
+                                        let _ = line.write_str(" ");
+                                        s.write_scope(&mut line, pos as usize)
+                                    }
+                                    _ => write!(&mut line, " #{pos}"),
+                                };
+                            }
+                        }
+                        None => {
+                            let _ = write!(&mut line, " 0x{payload:x}");
+                        }
+                    }
+                }
+                emit(line.as_str());
+            }
+        }
+
+        match &self.fault {
+            FaultRead::NotRequested => out!("device fault: not armed (BOYKO_GPU_CRASH_DIAG=fault arms it)"),
+            FaultRead::Unavailable => out!("device fault: VK_EXT_device_fault is unavailable on this device"),
+            FaultRead::QueryFailed(r) => out!("device fault: vkGetDeviceFaultInfoEXT returned {r:?}"),
+            FaultRead::Read(f) => {
+                out!(
+                    "device fault: \"{}\"; addresses {}; vendor records {}; vendor binary {} B",
+                    c_text(&f.description),
+                    f.address_total,
+                    f.vendor_total,
+                    f.binary_size
+                );
+                for (i, a) in f.addresses[..f.address_count.min(FAULT_ADDRESS_LINES)].iter().enumerate() {
+                    let mask = a.address_precision.max(1).wrapping_sub(1);
+                    let (lo, hi) = (a.reported_address & !mask, a.reported_address | mask);
+                    let more = if i + 1 == FAULT_ADDRESS_LINES && f.address_count > FAULT_ADDRESS_LINES {
+                        f.address_count - FAULT_ADDRESS_LINES
+                    } else {
+                        0
+                    };
+                    out!(
+                        "fault address {i}: {} 0x{:x} [0x{lo:x}..0x{hi:x}]{}",
+                        address_type_name(a.address_type),
+                        a.reported_address,
+                        if more > 0 { " (more follow)" } else { "" }
+                    );
+                }
+                for (i, v) in f.vendors[..f.vendor_count.min(FAULT_VENDOR_LINES)].iter().enumerate() {
+                    out!(
+                        "fault vendor record {i}: code 0x{:x} data 0x{:x} \"{}\"",
+                        v.vendor_fault_code,
+                        v.vendor_fault_data,
+                        c_text(&v.description)
+                    );
+                }
+            }
+        }
+
+        match self.vendor_status {
+            VendorBinaryStatus::Captured => match crate::gpu_crash::VendorBinaryHeader::decode(&self.vendor_binary) {
+                Some(h) => {
+                    line.clear();
+                    let _ = write!(
+                        &mut line,
+                        "vendor binary: {} B, vendor 0x{:x} device 0x{:x} driver 0x{:x} uuid ",
+                        self.vendor_binary.len(),
+                        h.vendor_id,
+                        h.device_id,
+                        h.driver_version
+                    );
+                    for b in h.pipeline_cache_uuid {
+                        let _ = write!(&mut line, "{b:02x}");
+                    }
+                    let _ = write!(&mut line, " -> {binary_outcome}");
+                    emit(line.as_str());
+                }
+                None => out!(
+                    "vendor binary: {} B, no version-one header -> {binary_outcome}",
+                    self.vendor_binary.len()
+                ),
+            },
+            VendorBinaryStatus::Unsupported => out!("vendor binary: not captured: unsupported"),
+            VendorBinaryStatus::Empty => out!("vendor binary: not captured: the driver reported none"),
+            VendorBinaryStatus::AllocationFailed => out!("vendor binary: not captured: the host allocation failed"),
+        }
+        out!(
+            "note: scopes overlap where no barrier orders them, so the in-flight set is a SET, not a culprit; \
+             marker contents after a device loss are undefined by the spec (read as a hint)"
+        );
+    }
+
+    /// One slot's breadcrumb line. Returns whether any scope of it was in flight.
+    fn write_slot(
+        &self,
+        s: &SlotSnapshot,
+        line: &mut boyko_log::DspBuf<REPORT_LINE_BYTES>,
+        emit: &mut impl FnMut(&str),
+    ) -> bool {
+        use core::fmt::Write as _;
+        line.clear();
+        let decl = DECLARATOR_NAMES.get(s.declarator as usize).copied().unwrap_or("?");
+        let _ = write!(
+            line,
+            "slot {} serial {} declarator {decl} passes {}: ",
+            s.fi, s.serial, s.pass_count
+        );
+        let Some(region) = s.region.as_ref() else {
+            let _ = line.write_str("no breadcrumbs");
+            emit(line.as_str());
+            return false;
+        };
+        let (frame_begin, frame_end) = (region[W_FRAME_BEGIN], region[W_FRAME_END]);
+        let recorded = s.recorded();
+        if frame_end == s.serial && frame_complete(region, s.serial, recorded) {
+            let _ = write!(line, "frame complete ({} scopes)", s.cursor);
+            emit(line.as_str());
+            return false;
+        }
+        if frame_begin != s.serial {
+            let _ = write!(line, "frame not started ({} scopes recorded)", s.cursor);
+            emit(line.as_str());
+            return false;
+        }
+        let state = |p: usize| scope_state(region, s.serial, p);
+        match (0..recorded).rev().find(|&p| state(p) == ScopeState::Completed) {
+            Some(p) => {
+                let _ = line.write_str("last completed ");
+                let _ = s.write_scope(line, p);
+            }
+            None => {
+                let _ = line.write_str("none completed");
+            }
+        }
+        let in_flight = (0..recorded).filter(|&p| state(p) == ScopeState::InFlight).count();
+        let _ = line.write_str("; in flight:");
+        for (i, p) in (0..recorded).filter(|&p| state(p) == ScopeState::InFlight).take(IN_FLIGHT_NAMED).enumerate() {
+            let _ = line.write_str(if i == 0 { " " } else { ", " });
+            let _ = s.write_scope(line, p);
+        }
+        if in_flight == 0 {
+            let _ = line.write_str(" none");
+        } else if in_flight > IN_FLIGHT_NAMED {
+            let _ = write!(line, " (+{} more)", in_flight - IN_FLIGHT_NAMED);
+        }
+        let not_started = (0..recorded).filter(|&p| state(p) == ScopeState::NotStarted).count();
+        let _ = write!(line, "; not started: {not_started}");
+        if let Some(p) = (0..recorded).find(|&p| state(p) == ScopeState::NotStarted) {
+            let _ = line.write_str(" (first ");
+            let _ = s.write_scope(line, p);
+            let _ = line.write_str(")");
+        }
+        if s.overflow > 0 {
+            let _ = write!(line, "; {} scopes past the breadcrumb cap", s.overflow);
+        }
+        emit(line.as_str());
+        in_flight > 0
+    }
+}
+
+impl Renderer<'_> {
+    /// Render rung GB: reads everything the GPU crash diagnostics can say about a device loss —
+    /// both slots' breadcrumbs (raw volatile reads of the mapping) with their pass names, the
+    /// NVIDIA checkpoints (`vkGetQueueCheckpointDataNV`, sync1) and the `VK_EXT_device_fault`
+    /// report with its vendor binary. Cold: the terminal path.
+    ///
+    /// # Safety
+    ///
+    /// The device reported `VK_ERROR_DEVICE_LOST` (both queries are legal only on a lost device:
+    /// `VUID-vkGetQueueCheckpointDataNV-queue-02025`, `VUID-vkGetDeviceFaultInfoEXT-device-07336`),
+    /// and `ctx` is the context this renderer was created on.
+    #[cold]
+    #[inline(never)]
+    pub unsafe fn device_lost_report(&self, ctx: &VulkanContext) -> DeviceLostReport {
+        let crash = ctx.gpu_crash();
+        let st = self.crumbs.as_deref();
+        let mut slots: [Option<SlotSnapshot>; FRAMES_IN_FLIGHT] = [None; FRAMES_IN_FLIGHT];
+        if let Some(st) = st {
+            for (fi, out) in slots.iter_mut().enumerate() {
+                let slot = &st.slots[fi];
+                if slot.serial.get() == 0 {
+                    continue;
+                }
+                let region = st.buffer.as_ref().map(|b| {
+                    let mut words = [0u32; REGION_WORDS];
+                    // SAFETY: the buffer is live (destroyed only in the renderer's `Drop`); on a
+                    // lost device the mapping stays valid with undefined contents, which the
+                    // report states; the reads are volatile and form no reference.
+                    unsafe { b.read_region(fi, &mut words) };
+                    words
+                });
+                *out = Some(SlotSnapshot {
+                    fi,
+                    serial: slot.serial.get(),
+                    declarator: slot.declarator.get(),
+                    pass_count: slot.pass_count.get(),
+                    cursor: slot.cursor.get(),
+                    overflow: slot.overflow.get(),
+                    region,
+                    scope_ids: core::array::from_fn(|i| slot.scope_ids[i].get()),
+                    names: core::array::from_fn(|i| slot.names[i].get()),
+                });
+            }
+        }
+
+        let wants = crash.level.requested_pieces();
+        let checkpoints = match st.and_then(|s| s.checkpoints) {
+            Some(c) => {
+                let mut total: u32 = 0;
+                // SAFETY: the device is lost (this fn's contract), the one state the query is
+                // legal in; `self.queue` is the renderer's live queue; a NULL array is the count
+                // query; `&mut total` is a valid out-pointer.
+                unsafe { (c.get_queue_checkpoint_data)(self.queue, &mut total, ptr::null_mut()) };
+                let mut data: [VkCheckpointDataNv; CHECKPOINT_READ_CAP] = core::array::from_fn(|_| VkCheckpointDataNv {
+                    s_type: VkStructureType::CheckpointDataNv,
+                    p_next: ptr::null_mut(),
+                    stage: 0,
+                    p_checkpoint_marker: ptr::null_mut(),
+                });
+                let mut count = total.min(CHECKPOINT_READ_CAP as u32);
+                // SAFETY: as above; `data` holds `count <= CHECKPOINT_READ_CAP` initialised
+                // output structs (each with its `s_type`), and `count` tells the driver so.
+                unsafe { (c.get_queue_checkpoint_data)(self.queue, &mut count, data.as_mut_ptr()) };
+                let count = (count as usize).min(CHECKPOINT_READ_CAP);
+                let mut entries = [(0u32, 0u64); CHECKPOINT_READ_CAP];
+                for (e, d) in entries.iter_mut().zip(&data[..count]) {
+                    *e = (d.stage, d.p_checkpoint_marker.addr() as u64);
+                }
+                CheckpointRead::Read { total, count, entries }
+            }
+            None if wants & piece::CHECKPOINTS != 0 => CheckpointRead::Unavailable,
+            None => CheckpointRead::NotRequested,
+        };
+
+        let mut vendor_binary = Vec::new();
+        let mut vendor_status = VendorBinaryStatus::Unsupported;
+        let fault = match crash.fault {
+            Some(f) => {
+                let mut counts = VkDeviceFaultCountsExt {
+                    s_type: VkStructureType::DeviceFaultCountsExt,
+                    p_next: ptr::null_mut(),
+                    address_info_count: 0,
+                    vendor_info_count: 0,
+                    vendor_binary_size: 0,
+                };
+                // SAFETY: the device is lost (contract); `ctx.device()` is the live device the
+                // fault piece was enabled on; `counts` is an initialised in/out struct and a NULL
+                // `p_fault_info` is the count query.
+                let r = VkResult::from_raw(unsafe { (f.get_device_fault_info)(ctx.device(), &mut counts, ptr::null_mut()) });
+                if !r.is_success() && r != VkResult::INCOMPLETE {
+                    FaultRead::QueryFailed(r)
+                } else {
+                    let mut rec = Box::new(FaultRecords {
+                        description: [0; VK_MAX_DESCRIPTION_SIZE],
+                        address_total: counts.address_info_count,
+                        addresses: [VkDeviceFaultAddressInfoExt { address_type: 0, reported_address: 0, address_precision: 0 };
+                            FAULT_RECORD_CAP],
+                        address_count: 0,
+                        vendor_total: counts.vendor_info_count,
+                        vendors: [VkDeviceFaultVendorInfoExt {
+                            description: [0; VK_MAX_DESCRIPTION_SIZE],
+                            vendor_fault_code: 0,
+                            vendor_fault_data: 0,
+                        }; FAULT_RECORD_CAP],
+                        vendor_count: 0,
+                        binary_size: counts.vendor_binary_size,
+                    });
+                    let binary_len = usize::try_from(counts.vendor_binary_size).unwrap_or(usize::MAX);
+                    if f.vendor_binary {
+                        vendor_status = if binary_len == 0 {
+                            VendorBinaryStatus::Empty
+                        } else if vendor_binary.try_reserve_exact(binary_len).is_ok() {
+                            vendor_binary.resize(binary_len, 0);
+                            VendorBinaryStatus::Captured
+                        } else {
+                            VendorBinaryStatus::AllocationFailed
+                        };
+                    }
+                    counts.address_info_count = counts.address_info_count.min(FAULT_RECORD_CAP as u32);
+                    counts.vendor_info_count = counts.vendor_info_count.min(FAULT_RECORD_CAP as u32);
+                    counts.vendor_binary_size =
+                        if vendor_status == VendorBinaryStatus::Captured { vendor_binary.len() as u64 } else { 0 };
+                    let mut info = VkDeviceFaultInfoExt {
+                        s_type: VkStructureType::DeviceFaultInfoExt,
+                        p_next: ptr::null_mut(),
+                        description: [0; VK_MAX_DESCRIPTION_SIZE],
+                        p_address_infos: rec.addresses.as_mut_ptr(),
+                        p_vendor_infos: rec.vendors.as_mut_ptr(),
+                        p_vendor_binary_data: if counts.vendor_binary_size > 0 {
+                            vendor_binary.as_mut_ptr().cast()
+                        } else {
+                            ptr::null_mut()
+                        },
+                    };
+                    // SAFETY: the device is lost (contract); `counts` now states the capacities of
+                    // the arrays `info` points at — `rec.addresses` / `rec.vendors` hold
+                    // `FAULT_RECORD_CAP` entries each and `vendor_binary` holds exactly
+                    // `vendor_binary_size` initialised bytes (or the pointer is NULL with a size of
+                    // 0); every pointee outlives the call and nothing else references it.
+                    let r = VkResult::from_raw(unsafe { (f.get_device_fault_info)(ctx.device(), &mut counts, &mut info) });
+                    if !r.is_success() && r != VkResult::INCOMPLETE {
+                        vendor_binary.clear();
+                        vendor_status = if f.vendor_binary { VendorBinaryStatus::Empty } else { vendor_status };
+                        FaultRead::QueryFailed(r)
+                    } else {
+                        rec.address_count = (counts.address_info_count as usize).min(FAULT_RECORD_CAP);
+                        rec.vendor_count = (counts.vendor_info_count as usize).min(FAULT_RECORD_CAP);
+                        rec.description = info.description;
+                        if vendor_status == VendorBinaryStatus::Captured {
+                            vendor_binary.truncate((counts.vendor_binary_size as usize).min(vendor_binary.len()));
+                        }
+                        FaultRead::Read(rec)
+                    }
+                }
+            }
+            None if wants & piece::FAULT != 0 => FaultRead::Unavailable,
+            None => FaultRead::NotRequested,
+        };
+
+        DeviceLostReport {
+            level: crash.level,
+            pieces: crash.pieces,
+            frame_pieces: self.crumb_bits,
+            slots,
+            checkpoints,
+            fault,
+            vendor_binary,
+            vendor_status,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1228,5 +1837,161 @@ mod tests {
         assert_eq!(crumb_memory_type(&p, 0b011), Some(1), "only the BAR is admitted");
         assert_eq!(crumb_memory_type(&p, 0b001), None);
         assert_eq!(crumb_memory_type(&props(&[hv]), u32::MAX), None, "coherence is required");
+    }
+
+    #[test]
+    fn checkpoint_payloads_round_trip() {
+        for kind in [CheckpointKind::Begin, CheckpointKind::End, CheckpointKind::FrameBegin, CheckpointKind::FrameEnd] {
+            for (serial, pos) in [(1u32, 0u16), (u32::MAX, u16::MAX), (0x1234_5678, 77)] {
+                assert_eq!(decode_checkpoint(encode_checkpoint(serial, kind, pos)), Some((serial, kind, pos)));
+            }
+        }
+        assert_eq!(decode_checkpoint(0x0000_0001_0009_0000), None, "an unknown kind is not GB's");
+        for h in HostScope::ALL {
+            assert_eq!(HostScope::from_id(h.id()), Some(h));
+        }
+        assert_eq!(HostScope::from_id(7), None);
+    }
+
+    const NAMES: [&str; 6] = ["gbuffer", "ssao", "ssao_atrous", "ssao_atrous", "ssao_atrous", "resolve"];
+
+    /// A slot whose frame `serial` recorded the six passes of [`NAMES`] then the present blit.
+    fn snapshot(fi: usize, serial: u32, region: [u32; REGION_WORDS]) -> SlotSnapshot {
+        let mut scope_ids = [0u16; CRUMB_SCOPE_CAP];
+        let mut names = [""; CRUMB_SCOPE_CAP];
+        for (p, n) in NAMES.iter().enumerate() {
+            scope_ids[p] = p as u16;
+            names[p] = n;
+        }
+        scope_ids[NAMES.len()] = HostScope::PresentBlit.id();
+        SlotSnapshot {
+            fi,
+            serial,
+            declarator: 0,
+            pass_count: NAMES.len() as u16,
+            cursor: NAMES.len() as u16 + 1,
+            overflow: 0,
+            region: Some(region),
+            scope_ids,
+            names,
+        }
+    }
+
+    fn vendor_fixture() -> Vec<u8> {
+        let mut b = vec![0u8; crate::gpu_crash::VendorBinaryHeader::SIZE + 8];
+        for (off, v) in [(0usize, 56u32), (4, 1), (8, 0x10de), (12, 0x2c02), (16, 0x9988_7766), (52, 0x0040_4155)] {
+            b[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        b
+    }
+
+    fn lines_of(r: &DeviceLostReport, outcome: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        r.write_lines("render", VkResult::ERROR_DEVICE_LOST, outcome, |l| lines.push(l.to_owned()));
+        lines
+    }
+
+    /// The device-loss report over a synthetic loss: both slots, newest serial first, the
+    /// in-flight SET with ordinals for the repeated à-trous passes, the checkpoints resolved to
+    /// pass names, the fault section and the vendor-binary header — every line bounded.
+    ///
+    /// RED: drop the newest-first sort in `write_lines` and slot 0 (serial 8) prints first.
+    #[test]
+    fn the_report_names_the_in_flight_set_newest_slot_first() {
+        let (old, new) = (8u32, 9u32);
+        // Slot 1 holds the newer frame: 3 scopes completed, 2 overlapping in flight, 2 not started.
+        let mut lost = region(new, 3, 5, false);
+        lost[W_SCOPES + 2 * 5] = old; // a stale begin from the frame before is "not started"
+        let mut fault = Box::new(FaultRecords {
+            description: [0; VK_MAX_DESCRIPTION_SIZE],
+            address_total: 1,
+            addresses: [VkDeviceFaultAddressInfoExt { address_type: 2, reported_address: 0x1234_5678, address_precision: 4096 };
+                FAULT_RECORD_CAP],
+            address_count: 1,
+            vendor_total: 1,
+            vendors: [VkDeviceFaultVendorInfoExt { description: [0; VK_MAX_DESCRIPTION_SIZE], vendor_fault_code: 0xC0, vendor_fault_data: 0xDA7A };
+                FAULT_RECORD_CAP],
+            vendor_count: 1,
+            binary_size: 64,
+        });
+        for (i, b) in b"MMU fault".iter().enumerate() {
+            fault.description[i] = *b as core::ffi::c_char;
+            fault.vendors[0].description[i] = *b as core::ffi::c_char;
+        }
+        let mut entries = [(0u32, 0u64); CHECKPOINT_READ_CAP];
+        entries[0] = (VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, encode_checkpoint(new, CheckpointKind::Begin, 4));
+        entries[1] = (VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, encode_checkpoint(new, CheckpointKind::End, 2));
+        let report = DeviceLostReport {
+            level: GpuCrashDiagLevel::Checkpoints,
+            pieces: piece::FAULT | piece::PER_FRAME,
+            frame_pieces: piece::PER_FRAME,
+            slots: [Some(snapshot(0, old, region(old, 7, 7, true))), Some(snapshot(1, new, lost))],
+            checkpoints: CheckpointRead::Read { total: 2, count: 2, entries },
+            fault: FaultRead::Read(fault),
+            vendor_binary: vendor_fixture(),
+            vendor_status: VendorBinaryStatus::Captured,
+        };
+        let lines = lines_of(&report, "D:/out/boyko-gpu-fault.bin");
+        let text = lines.join("\n");
+        assert!(lines.len() <= 16, "{} lines:\n{text}", lines.len());
+        assert!(lines.iter().all(|l| l.len() <= REPORT_LINE_BYTES), "{text}");
+        assert!(
+            lines[0].starts_with("device lost at render (VK_ERROR_DEVICE_LOST); GPU crash report: level=checkpoints \
+                                  pieces=fault,labels,markers,checkpoints profile="),
+            "{text}"
+        );
+        assert!(
+            lines[1].starts_with("slot 1 serial 9 declarator deferred passes 6: "),
+            "the newest serial prints first:\n{text}"
+        );
+        assert!(lines[1].contains("last completed #2 ssao_atrous#0"), "{text}");
+        assert!(lines[1].contains("in flight: #3 ssao_atrous#1, #4 ssao_atrous#2"), "{text}");
+        assert!(lines[1].contains("not started: 2 (first #5 resolve)"), "{text}");
+        assert!(lines[2].starts_with("slot 0 serial 8 declarator deferred passes 6: frame complete (7 scopes)"), "{text}");
+        assert!(!text.contains("no GB scope was in flight"), "{text}");
+        assert!(text.contains("checkpoints (2): TOP_OF_PIPE -> serial 9 begin #4 ssao_atrous#2; BOTTOM_OF_PIPE -> serial 9 end #2 ssao_atrous#0"), "{text}");
+        assert!(text.contains("device fault: \"MMU fault\"; addresses 1; vendor records 1; vendor binary 64 B"), "{text}");
+        assert!(text.contains("fault address 0: write-invalid 0x12345678 [0x12345000..0x12345fff]"), "{text}");
+        assert!(text.contains("fault vendor record 0: code 0xc0 data 0xda7a \"MMU fault\""), "{text}");
+        assert!(text.contains("vendor binary: 64 B, vendor 0x10de device 0x2c02 driver 0x99887766 uuid 00000000000000000000000000000000 -> D:/out/boyko-gpu-fault.bin"), "{text}");
+        assert!(lines.last().is_some_and(|l| l.starts_with("note: scopes overlap")), "{text}");
+    }
+
+    /// A level without breadcrumbs, checkpoints or the fault query says so, piece by piece.
+    #[test]
+    fn the_report_names_every_missing_piece() {
+        let report = DeviceLostReport {
+            level: GpuCrashDiagLevel::Labels,
+            pieces: piece::LABELS,
+            frame_pieces: piece::LABELS,
+            slots: [None, None],
+            checkpoints: CheckpointRead::NotRequested,
+            fault: FaultRead::NotRequested,
+            vendor_binary: Vec::new(),
+            vendor_status: VendorBinaryStatus::Unsupported,
+        };
+        let text = lines_of(&report, "").join("\n");
+        assert!(text.contains("breadcrumbs not armed (BOYKO_GPU_CRASH_DIAG=markers arms them)"), "{text}");
+        assert!(text.contains("checkpoints not armed"), "{text}");
+        assert!(text.contains("device fault: not armed"), "{text}");
+        assert!(text.contains("vendor binary: not captured: unsupported"), "{text}");
+    }
+
+    /// Every slot complete: the loss came from outside the frame (critique open question 2).
+    #[test]
+    fn a_loss_with_nothing_in_flight_points_outside_the_frame() {
+        let report = DeviceLostReport {
+            level: GpuCrashDiagLevel::Markers,
+            pieces: piece::LABELS | piece::MARKERS,
+            frame_pieces: piece::LABELS | piece::MARKERS,
+            slots: [Some(snapshot(0, 4, region(4, 7, 7, true))), Some(snapshot(1, 5, region(5, 7, 7, true)))],
+            checkpoints: CheckpointRead::NotRequested,
+            fault: FaultRead::Unavailable,
+            vendor_binary: Vec::new(),
+            vendor_status: VendorBinaryStatus::Unsupported,
+        };
+        let text = lines_of(&report, "").join("\n");
+        assert!(text.contains("no GB scope was in flight in either slot"), "{text}");
+        assert!(text.contains("device fault: VK_EXT_device_fault is unavailable"), "{text}");
     }
 }

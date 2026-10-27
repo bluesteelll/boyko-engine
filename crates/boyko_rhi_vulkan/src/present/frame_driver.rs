@@ -114,6 +114,10 @@ pub struct Renderer<'ctx> {
     /// Render rung GB: the chained-scope state (marker buffer, slot shadows, ledger) — `Some` iff
     /// `crumb_bits != 0`. Boxed: allocated once at boot, armed runs only.
     pub(crate) crumbs: Option<Box<super::gpu_crumbs::CrumbState>>,
+    /// Render rung GB (G3): the engine frame the TEST-ONLY `test_gpu_hang` pass is declared and
+    /// recorded on — `Some` only after [`arm_gpu_hang`](Self::arm_gpu_hang) accepted. `None` in
+    /// every shipped run.
+    pub(crate) gpu_hang_at: Option<u32>,
 }
 
 impl<'ctx> Renderer<'ctx> {
@@ -294,7 +298,25 @@ impl<'ctx> Renderer<'ctx> {
             nan_inject_at: None,
             crumb_bits,
             crumbs,
+            gpu_hang_at: None,
         })
+    }
+
+    /// Render rung GB (G3): arms the TEST-ONLY `test_gpu_hang` pass on engine frame `at_frame`.
+    /// Accepted only when the build compiles GB in at `markers` or above and this run armed the
+    /// breadcrumbs — the forced-hang gate reads them back — and refused (returns `false`)
+    /// otherwise, so a `shipping` build can never arm it. The caller (the windowed runner) also
+    /// requires the `inject_gpu_hang` force key AND the explicit opt-in variable. Cold — once, at
+    /// boot.
+    #[cold]
+    #[inline(never)]
+    pub fn arm_gpu_hang(&mut self, at_frame: u32) -> bool {
+        let ok = crate::gpu_crash::GpuCrashDiagLevel::CEILING >= crate::gpu_crash::GpuCrashDiagLevel::Markers
+            && self.crumb_bits & crate::gpu_crash::piece::MARKERS != 0;
+        if ok {
+            self.gpu_hang_at = Some(at_frame);
+        }
+        ok
     }
 
     /// Render wave PX1a (H4 Scope 3, test 12): arms the TEST-ONLY NaN injection — the targets

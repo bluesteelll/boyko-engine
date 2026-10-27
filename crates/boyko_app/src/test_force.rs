@@ -20,6 +20,7 @@
 //! - `disarm_sdf_merge` (render wave RD1, defect R0b) — [`TestForceKey::DisarmSdfMerge`].
 //! - `srgb_swapchain` (render wave PX1a, D-P1) — [`TestForceKey::SrgbSwapchain`].
 //! - `inject_nan_lit` (render wave PX1a, H4 Scope 3 / test 12) — [`TestForceKey::InjectNanLit`].
+//! - `inject_gpu_hang` (render rung GB, gate G3) — [`TestForceKey::InjectGpuHang`].
 
 use boyko_macros::Resource;
 
@@ -44,11 +45,21 @@ pub enum TestForceKey {
     /// exercised on a real frame. Armed at boot by the windowed runner (`Renderer::arm_nan_inject`):
     /// only then does `lit` carry `TRANSFER_DST` and the 8-byte source buffer exist.
     InjectNanLit,
+    /// Render rung GB (gate G3): the test-only `test_gpu_hang` pass is declared and recorded on
+    /// engine frame [`INJECT_GPU_HANG_FRAME`], inside its own GB scope, so the device-loss report
+    /// can be checked against a known culprit. Armed at boot by the windowed runner only when
+    /// `BOYKO_GPU_HANG_OPT_IN` ALSO holds its exact value (`crate::gpu_crash::gpu_hang_opted_in`)
+    /// and the build admits breadcrumbs: a forced device loss resets the display driver.
+    InjectGpuHang,
 }
 
 /// The engine frame (`GBufferScene::engine_frame_index`) the `inject_nan_lit` key injects on —
 /// late enough that TAA's history has converged on a static scene (test 12 dumps 16 frames later).
 pub const INJECT_NAN_LIT_FRAME: u32 = 40;
+
+/// The engine frame the `inject_gpu_hang` key hangs on — late enough that both frame slots have
+/// recorded armed frames, so the report has a "frame complete" slot beside the lost one.
+pub const INJECT_GPU_HANG_FRAME: u32 = 20;
 
 impl TestForceKey {
     /// Every key with its `BOYKO_TEST_FORCE` spelling; a key's bit is its index here.
@@ -56,6 +67,7 @@ impl TestForceKey {
         (TestForceKey::DisarmSdfMerge, "disarm_sdf_merge"),
         (TestForceKey::SrgbSwapchain, "srgb_swapchain"),
         (TestForceKey::InjectNanLit, "inject_nan_lit"),
+        (TestForceKey::InjectGpuHang, "inject_gpu_hang"),
     ];
 
     /// This key's bit in [`TestForce`].
@@ -65,6 +77,7 @@ impl TestForceKey {
             TestForceKey::DisarmSdfMerge => 1 << 0,
             TestForceKey::SrgbSwapchain => 1 << 1,
             TestForceKey::InjectNanLit => 1 << 2,
+            TestForceKey::InjectGpuHang => 1 << 3,
         }
     }
 }

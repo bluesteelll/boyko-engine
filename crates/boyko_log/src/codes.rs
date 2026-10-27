@@ -1119,6 +1119,13 @@ codes! {
     // second.
     (3012, W, W3012, RatePolicy::Once,  CodeStatus::Live,
         "No PostPlugin was composed, so the runner derives the post settings from LightingConfig"),
+    // ── render rung GB: the device-loss report ───────────────────────────────────────────────
+    // Its own code, not `E3003`'s: `E3003` is the generic terminal device error (it also covers an
+    // out-of-device-memory exit), while this is the crash report that follows a DEVICE LOSS, with
+    // its own content (the in-flight scopes, the checkpoints, the fault record) and its own fix.
+    // `Every`: one record per report line, and a terminal path - the loop returns after it.
+    (3013, E, E3013, RatePolicy::Every, CodeStatus::Live,
+        "A device loss was diagnosed, and the GPU crash report follows"),
 
     (9001, B, B9001, RatePolicy::Every, CodeStatus::Live,
         "The schedule contains a cycle of systems"),

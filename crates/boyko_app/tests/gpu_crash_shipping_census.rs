@@ -50,8 +50,10 @@ const GB_ONLY_NAMES: &[&str] = &[
     "vkCmdWriteBufferMarkerAMD",
     "vkCmdSetCheckpointNV",
     "vkGetQueueCheckpointDataNV",
+    "vkGetDeviceFaultInfoEXT",
     "VK_AMD_buffer_marker",
     "VK_NV_device_diagnostic_checkpoints",
+    "VK_EXT_device_fault",
 ];
 
 /// Every per-knob override the profile axis honours only under `custom`: a stray one beside a

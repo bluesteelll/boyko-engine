@@ -466,6 +466,10 @@ impl VkResult {
     pub const ERROR_OUT_OF_HOST_MEMORY: Self = Self(-1);
     pub const ERROR_OUT_OF_DEVICE_MEMORY: Self = Self(-2);
     pub const ERROR_INITIALIZATION_FAILED: Self = Self(-3);
+    /// `VK_ERROR_DEVICE_LOST` — the logical device was lost (a GPU hang, a page fault, a driver
+    /// reset). Terminal for the device; render rung GB's report reads the breadcrumbs, the
+    /// checkpoints and `VK_EXT_device_fault` after it.
+    pub const ERROR_DEVICE_LOST: Self = Self(-4);
     pub const ERROR_LAYER_NOT_PRESENT: Self = Self(-6);
     pub const ERROR_EXTENSION_NOT_PRESENT: Self = Self(-7);
     pub const ERROR_FEATURE_NOT_PRESENT: Self = Self(-8);
@@ -508,6 +512,7 @@ impl core::fmt::Debug for VkResult {
             Self::ERROR_OUT_OF_HOST_MEMORY => "VK_ERROR_OUT_OF_HOST_MEMORY",
             Self::ERROR_OUT_OF_DEVICE_MEMORY => "VK_ERROR_OUT_OF_DEVICE_MEMORY",
             Self::ERROR_INITIALIZATION_FAILED => "VK_ERROR_INITIALIZATION_FAILED",
+            Self::ERROR_DEVICE_LOST => "VK_ERROR_DEVICE_LOST",
             Self::ERROR_LAYER_NOT_PRESENT => "VK_ERROR_LAYER_NOT_PRESENT",
             Self::ERROR_EXTENSION_NOT_PRESENT => "VK_ERROR_EXTENSION_NOT_PRESENT",
             Self::ERROR_FEATURE_NOT_PRESENT => "VK_ERROR_FEATURE_NOT_PRESENT",
@@ -651,6 +656,13 @@ pub enum VkStructureType {
     /// `VK_STRUCTURE_TYPE_CHECKPOINT_DATA_NV` (render rung GB: the post-loss checkpoint read).
     /// `VK_NV_device_diagnostic_checkpoints` is extension 207.
     CheckpointDataNv = 1_000_206_000,
+    /// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT` (render rung GB). `VK_EXT_device_fault`
+    /// is extension 342, so its block is `1000000000 + 341 * 1000`.
+    PhysicalDeviceFaultFeaturesExt = 1_000_341_000,
+    /// `VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT`.
+    DeviceFaultCountsExt = 1_000_341_001,
+    /// `VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT`.
+    DeviceFaultInfoExt = 1_000_341_002,
 }
 
 // ---------------------------------------------------------------------------
@@ -4343,3 +4355,109 @@ pub type PfnVkGetQueueCheckpointDataNv = unsafe extern "system" fn(
     p_checkpoint_data_count: *mut u32,
     p_checkpoint_data: *mut VkCheckpointDataNv,
 );
+
+// --- Render rung GB — the device-loss report: `VK_EXT_device_fault`. ---
+
+/// `VK_EXT_device_fault` device-extension name (render rung GB's fault piece). SDK 1.4.363 marks it
+/// promoted to `VK_KHR_device_fault` (a different API); the reference driver advertises the EXT.
+pub const VK_EXT_DEVICE_FAULT_EXTENSION_NAME: &core::ffi::CStr = c"VK_EXT_device_fault";
+
+/// `VK_MAX_DESCRIPTION_SIZE`.
+pub const VK_MAX_DESCRIPTION_SIZE: usize = 256;
+
+/// `VkPhysicalDeviceFaultFeaturesEXT` — chained into `vkGetPhysicalDeviceFeatures2` to READ and
+/// into `VkDeviceCreateInfo` to ENABLE the two fault features. Both bits are queried before either
+/// is requested: an iGPU here reports `deviceFault` without `deviceFaultVendorBinary`.
+#[repr(C)]
+pub struct VkPhysicalDeviceFaultFeaturesExt {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub device_fault: VkBool32,
+    pub device_fault_vendor_binary: VkBool32,
+}
+
+/// `VkDeviceFaultCountsEXT` — the count query's in/out struct.
+#[repr(C)]
+pub struct VkDeviceFaultCountsExt {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub address_info_count: u32,
+    pub vendor_info_count: u32,
+    /// `VkDeviceSize`.
+    pub vendor_binary_size: u64,
+}
+
+/// `VkDeviceFaultAddressInfoEXT` — one faulting (or instruction) address, with its precision.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkDeviceFaultAddressInfoExt {
+    /// `VkDeviceFaultAddressTypeEXT` (`VK_DEVICE_FAULT_ADDRESS_TYPE_*_EXT`).
+    pub address_type: i32,
+    /// `VkDeviceAddress`.
+    pub reported_address: u64,
+    /// `VkDeviceSize`: the address is exact to `[addr & !(precision - 1), addr | (precision - 1)]`.
+    pub address_precision: u64,
+}
+
+/// `VkDeviceFaultVendorInfoEXT` — one vendor-defined fault record.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct VkDeviceFaultVendorInfoExt {
+    pub description: [c_char; VK_MAX_DESCRIPTION_SIZE],
+    pub vendor_fault_code: u64,
+    pub vendor_fault_data: u64,
+}
+
+/// `VkDeviceFaultInfoEXT` — the fault query's output: the description and the caller's arrays.
+#[repr(C)]
+pub struct VkDeviceFaultInfoExt {
+    pub s_type: VkStructureType,
+    pub p_next: *mut c_void,
+    pub description: [c_char; VK_MAX_DESCRIPTION_SIZE],
+    pub p_address_infos: *mut VkDeviceFaultAddressInfoExt,
+    pub p_vendor_infos: *mut VkDeviceFaultVendorInfoExt,
+    pub p_vendor_binary_data: *mut c_void,
+}
+
+/// `VkDeviceFaultVendorBinaryHeaderVersionOneEXT` — the 56-byte header every vendor binary starts
+/// with (vk.xml 1.4.363). The binary arrives as bytes with alignment 1, so this layout is decoded
+/// field by field with `from_le_bytes` (`gpu_crash::VendorBinaryHeader`), never referenced in
+/// place; the struct exists to pin the offsets.
+#[repr(C)]
+pub struct VkDeviceFaultVendorBinaryHeaderVersionOneExt {
+    pub header_size: u32,
+    /// `VkDeviceFaultVendorBinaryHeaderVersionEXT` (`1` = version one).
+    pub header_version: i32,
+    pub vendor_id: u32,
+    pub device_id: u32,
+    pub driver_version: u32,
+    pub pipeline_cache_uuid: [u8; 16],
+    pub application_name_offset: u32,
+    pub application_version: u32,
+    pub engine_name_offset: u32,
+    pub engine_version: u32,
+    pub api_version: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<VkPhysicalDeviceFaultFeaturesExt>() == 24);
+const _: () = assert!(core::mem::align_of::<VkPhysicalDeviceFaultFeaturesExt>() == 8);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultCountsExt>() == 32);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultCountsExt, vendor_binary_size) == 24);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultAddressInfoExt>() == 24);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultAddressInfoExt, reported_address) == 8);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultVendorInfoExt>() == 272);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultVendorInfoExt, vendor_fault_code) == 256);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultInfoExt>() == 296);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultInfoExt, p_address_infos) == 272);
+const _: () = assert!(core::mem::size_of::<VkDeviceFaultVendorBinaryHeaderVersionOneExt>() == 56);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultVendorBinaryHeaderVersionOneExt, pipeline_cache_uuid) == 20);
+const _: () = assert!(core::mem::offset_of!(VkDeviceFaultVendorBinaryHeaderVersionOneExt, api_version) == 52);
+
+/// `PFN_vkGetDeviceFaultInfoEXT` — the two-call fault read: counts with a NULL `p_fault_info`,
+/// then the records. Legal only on a lost device (`VUID-vkGetDeviceFaultInfoEXT-device-07336`);
+/// `VK_INCOMPLETE` when the caller's arrays were smaller than the counts.
+pub type PfnVkGetDeviceFaultInfoExt = unsafe extern "system" fn(
+    device: VkDevice,
+    p_fault_counts: *mut VkDeviceFaultCountsExt,
+    p_fault_info: *mut VkDeviceFaultInfoExt,
+) -> i32;

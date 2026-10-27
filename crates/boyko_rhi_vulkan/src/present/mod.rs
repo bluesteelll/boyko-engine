@@ -64,6 +64,7 @@ mod targets;
 pub mod transparent_depth;
 
 pub use frame_driver::{FRAME_GRAPH_CAPACITY, FrameGraphCapacity, FrameWriteToken, Renderer};
+pub use gpu_crumbs::{DeviceLostReport, VendorBinaryStatus};
 pub use frame_driver::{
     RECEIPT_CONFIG_KEYS, RECEIPT_CONFIG_LEN, RECEIPT_MAX_SINK_SLOTS, ReceiptCapture, ReceiptConfig,
 };

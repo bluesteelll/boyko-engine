@@ -33,7 +33,8 @@
 
 use crate::ffi::{
     PfnVkCmdBeginDebugUtilsLabelExt, PfnVkCmdEndDebugUtilsLabelExt, PfnVkCmdSetCheckpointNv,
-    PfnVkCmdWriteBufferMarkerAmd, PfnVkGetQueueCheckpointDataNv, PfnVkSetDebugUtilsObjectNameExt,
+    PfnVkCmdWriteBufferMarkerAmd, PfnVkGetDeviceFaultInfoExt, PfnVkGetQueueCheckpointDataNv,
+    PfnVkSetDebugUtilsObjectNameExt,
 };
 
 /// The GPU crash-diagnostics arming level. Cumulative: each level includes every piece below it.
@@ -177,6 +178,16 @@ pub struct CheckpointFns {
     pub get_queue_checkpoint_data: PfnVkGetQueueCheckpointDataNv,
 }
 
+/// The `VK_EXT_device_fault` entry point, loaded through `vkGetDeviceProcAddr` when
+/// [`piece::FAULT`] is armed.
+#[derive(Clone, Copy)]
+pub struct FaultFns {
+    /// `vkGetDeviceFaultInfoEXT` (legal only on a lost device).
+    pub get_device_fault_info: PfnVkGetDeviceFaultInfoExt,
+    /// `deviceFaultVendorBinary` was enabled: the query may return the vendor's binary dump.
+    pub vendor_binary: bool,
+}
+
 /// What a boot armed: the clamped level, the piece bits that survived the probe, and the loaded
 /// entry points. `Copy` POD, read once by each consumer at its own construction.
 #[derive(Clone, Copy, Default)]
@@ -191,6 +202,8 @@ pub struct GpuCrashState {
     pub markers: Option<MarkerFns>,
     /// `Some` iff [`piece::CHECKPOINTS`] is armed.
     pub checkpoints: Option<CheckpointFns>,
+    /// `Some` iff [`piece::FAULT`] is armed.
+    pub fault: Option<FaultFns>,
 }
 
 impl GpuCrashState {
@@ -201,12 +214,60 @@ impl GpuCrashState {
         debug_utils: None,
         markers: None,
         checkpoints: None,
+        fault: None,
     };
 
     /// `true` iff piece `bit` is armed.
     #[inline]
     pub const fn has(&self, bit: u8) -> bool {
         self.pieces & bit != 0
+    }
+}
+
+/// The decoded `VkDeviceFaultVendorBinaryHeaderVersionOneEXT` at the start of a vendor binary.
+///
+/// Decoded byte by byte with `from_le_bytes` (the binary is a byte buffer with alignment 1, so a
+/// reference to the C struct in place would be misaligned), Vulkan being little-endian on every
+/// platform this engine targets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VendorBinaryHeader {
+    /// `headerSize` (56 for version one).
+    pub header_size: u32,
+    /// `headerVersion` (1).
+    pub header_version: u32,
+    /// `vendorID` (PCI).
+    pub vendor_id: u32,
+    /// `deviceID` (PCI).
+    pub device_id: u32,
+    /// `driverVersion`, vendor-encoded.
+    pub driver_version: u32,
+    /// `pipelineCacheUUID`.
+    pub pipeline_cache_uuid: [u8; 16],
+    /// `apiVersion`.
+    pub api_version: u32,
+}
+
+impl VendorBinaryHeader {
+    /// The version-one header's size in bytes.
+    pub const SIZE: usize = 56;
+
+    /// Decodes the header at the start of `bytes`; `None` if fewer than [`Self::SIZE`] bytes or a
+    /// `headerVersion` other than 1.
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let head = bytes.get(..Self::SIZE)?;
+        let word = |at: usize| u32::from_le_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
+        let mut uuid = [0u8; 16];
+        uuid.copy_from_slice(&head[20..36]);
+        let header = Self {
+            header_size: word(0),
+            header_version: word(4),
+            vendor_id: word(8),
+            device_id: word(12),
+            driver_version: word(16),
+            pipeline_cache_uuid: uuid,
+            api_version: word(52),
+        };
+        (header.header_version == 1).then_some(header)
     }
 }
 
@@ -307,6 +368,42 @@ mod tests {
             assert_ne!(a, b, "{hi:?} adds no piece over {lo:?}");
         }
         assert_eq!(GpuCrashDiagLevel::Checkpoints.requested_pieces(), piece::FAULT | piece::PER_FRAME);
+    }
+
+    /// The vendor-binary header decodes from an unaligned byte buffer (critique M6: no reference
+    /// into the bytes), and a wrong version or a short buffer is refused.
+    #[test]
+    fn the_vendor_binary_header_decodes_from_bytes() {
+        let mut bytes = vec![0u8; 1 + super::VendorBinaryHeader::SIZE + 8];
+        let at = 1; // deliberately misaligned for every 4-byte field
+        let put = |b: &mut Vec<u8>, off: usize, v: u32| b[at + off..at + off + 4].copy_from_slice(&v.to_le_bytes());
+        put(&mut bytes, 0, 56);
+        put(&mut bytes, 4, 1);
+        put(&mut bytes, 8, 0x10de);
+        put(&mut bytes, 12, 0x2c02);
+        put(&mut bytes, 16, 0x9988_7766);
+        for i in 0..16 {
+            bytes[at + 20 + i] = i as u8;
+        }
+        put(&mut bytes, 52, 0x0040_4155);
+        let h = super::VendorBinaryHeader::decode(&bytes[at..]).expect("a version-one header");
+        assert_eq!((h.header_size, h.header_version, h.vendor_id, h.device_id), (56, 1, 0x10de, 0x2c02));
+        assert_eq!(h.driver_version, 0x9988_7766);
+        assert_eq!(h.pipeline_cache_uuid[15], 15);
+        assert_eq!(h.api_version, 0x0040_4155);
+        assert_eq!(super::VendorBinaryHeader::decode(&bytes[at..at + 55]), None, "short");
+        put(&mut bytes, 4, 2);
+        assert_eq!(super::VendorBinaryHeader::decode(&bytes[at..]), None, "version two is not version one");
+    }
+
+    /// A device loss prints by name, not as `VkResult(-4)` (the `E3003` line carries it).
+    ///
+    /// RED: drop the `ERROR_DEVICE_LOST` arm from `VkResult`'s `Debug` and this reads
+    /// `VkResult(-4)`.
+    #[test]
+    fn a_device_loss_prints_by_name() {
+        assert_eq!(format!("{:?}", crate::ffi::VkResult(-4)), "VK_ERROR_DEVICE_LOST");
+        assert_eq!(crate::ffi::VkResult::ERROR_DEVICE_LOST, crate::ffi::VkResult(-4));
     }
 
     #[test]

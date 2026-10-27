@@ -38,7 +38,9 @@ use boyko_log::codes::{E2101, OnceSite, W2102, W2107};
 
 use crate::debug::{self, DebugMessengerState};
 use crate::ffi::*;
-use crate::gpu_crash::{CheckpointFns, DebugUtilsCmdFns, GpuCrashDiagLevel, GpuCrashState, MarkerFns, piece};
+use crate::gpu_crash::{
+    CheckpointFns, DebugUtilsCmdFns, FaultFns, GpuCrashDiagLevel, GpuCrashState, MarkerFns, piece,
+};
 use crate::memory::{BlockPool, DeviceLocalBlock, HostVisibleBlock};
 use crate::pipeline_cache::{
     self, CacheLoad, CacheSave, DeviceIdentity, PipelineCachePolicy, PipelineCacheStore,
@@ -1348,9 +1350,9 @@ impl VulkanContext {
         // missing one reports `boyko-W2107` instead. `COMPILED_IN` folds the probe away in a
         // `shipping` build.
         let gpu_crash_device = if GpuCrashDiagLevel::COMPILED_IN
-            && gpu_crash_boot.level.requested_pieces() & (piece::MARKERS | piece::CHECKPOINTS) != 0
+            && gpu_crash_boot.level.requested_pieces() & (piece::FAULT | piece::MARKERS | piece::CHECKPOINTS) != 0
         {
-            probe_gpu_crash_device(gipa, instance, physical_device, gpu_crash_boot.level)
+            probe_gpu_crash_device(&instance_fns, gipa, instance, physical_device, gpu_crash_boot.level)
         } else {
             GpuCrashDevice::default()
         };
@@ -1369,6 +1371,8 @@ impl VulkanContext {
                 enable_calibrated_timestamps: device_caps.calibrated_timestamps,
                 enable_buffer_marker: gpu_crash_boot.device.buffer_marker,
                 enable_checkpoints: gpu_crash_boot.device.checkpoints,
+                enable_device_fault: gpu_crash_boot.device.fault,
+                enable_device_fault_vendor_binary: gpu_crash_boot.device.fault_vendor_binary,
             },
         ) {
             Ok(d) => d,
@@ -4011,6 +4015,11 @@ pub(crate) static W2107_LABELS_SITE: OnceSite = OnceSite::new();
 pub(crate) static W2107_MARKERS_SITE: OnceSite = OnceSite::new();
 /// `boyko-W2107`, site 3 — the checkpoints piece (`VK_NV_device_diagnostic_checkpoints`).
 pub(crate) static W2107_CHECKPOINTS_SITE: OnceSite = OnceSite::new();
+/// `boyko-W2107`, site 4 — the fault piece (`VK_EXT_device_fault` or its `deviceFault` feature).
+pub(crate) static W2107_FAULT_SITE: OnceSite = OnceSite::new();
+/// `boyko-W2107`, site 5 — the fault piece's vendor binary (`deviceFaultVendorBinary`): the report
+/// still prints the fault's addresses and vendor records, without the binary dump.
+pub(crate) static W2107_FAULT_BINARY_SITE: OnceSite = OnceSite::new();
 
 /// `boyko-W2107` — a GPU crash-diagnostics piece the arming level asked for is unavailable on
 /// this device, so the run continues without it. `site` is the piece's own latch.
@@ -4047,6 +4056,10 @@ struct GpuCrashDevice {
     buffer_marker: bool,
     /// `VK_NV_device_diagnostic_checkpoints` (the checkpoints piece).
     checkpoints: bool,
+    /// `VK_EXT_device_fault` with `deviceFault` (the fault piece).
+    fault: bool,
+    /// ... and `deviceFaultVendorBinary`.
+    fault_vendor_binary: bool,
 }
 
 /// Probes the device extensions of the pieces `level` requests and reports `boyko-W2107` for each
@@ -4054,6 +4067,7 @@ struct GpuCrashDevice {
 #[cold]
 #[inline(never)]
 fn probe_gpu_crash_device(
+    fns: &InstanceFns,
     gipa: PfnVkGetInstanceProcAddr,
     instance: VkInstance,
     physical_device: VkPhysicalDevice,
@@ -4088,6 +4102,39 @@ fn probe_gpu_crash_device(
                 &W2107_CHECKPOINTS_SITE,
                 "checkpoints",
                 "the device does not advertise VK_NV_device_diagnostic_checkpoints",
+            );
+        }
+    }
+    if wanted & piece::FAULT != 0 {
+        let present = has(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        let (mut device_fault, mut vendor_binary) = (false, false);
+        if present {
+            let mut features = zeroed_fault_features();
+            let mut features2 = VkPhysicalDeviceFeatures2 {
+                s_type: VkStructureType::PhysicalDeviceFeatures2,
+                p_next: (&mut features as *mut VkPhysicalDeviceFaultFeaturesExt).cast(),
+                features: VkPhysicalDeviceFeatures::default(),
+            };
+            // SAFETY: `physical_device` is a valid enumerated GPU that advertises
+            // `VK_EXT_device_fault`, so the chained struct is one the driver recognises; `features2`
+            // is fully initialised and its `p_next` points at the live `features` local, both
+            // outliving the call; the driver writes the two supported bools through the chain.
+            unsafe { (fns.get_physical_device_features2)(physical_device, &mut features2) };
+            device_fault = features.device_fault == VK_TRUE;
+            vendor_binary = features.device_fault_vendor_binary == VK_TRUE;
+        }
+        (found.fault, found.fault_vendor_binary) = fault_feature_enables(present, device_fault, vendor_binary);
+        if !found.fault {
+            report_gpu_crash_piece_unavailable(
+                &W2107_FAULT_SITE,
+                "fault",
+                "the device does not advertise VK_EXT_device_fault with deviceFault",
+            );
+        } else if !found.fault_vendor_binary {
+            report_gpu_crash_piece_unavailable(
+                &W2107_FAULT_BINARY_SITE,
+                "fault vendor binary",
+                "the device does not support deviceFaultVendorBinary; the report carries no binary dump",
             );
         }
     }
@@ -4153,6 +4200,22 @@ fn arm_gpu_crash(
                 &W2107_CHECKPOINTS_SITE,
                 "checkpoints",
                 "the VK_NV_device_diagnostic_checkpoints entry points did not resolve",
+            ),
+        }
+    }
+    if boot.device.fault {
+        // SAFETY: as above — `create_device` enabled `VK_EXT_device_fault` with `deviceFault`.
+        let get: Option<PfnVkGetDeviceFaultInfoExt> =
+            unsafe { load_device_command(gdpa, device, c"vkGetDeviceFaultInfoEXT") }.ok();
+        match get {
+            Some(get_device_fault_info) => {
+                state.fault = Some(FaultFns { get_device_fault_info, vendor_binary: boot.device.fault_vendor_binary });
+                state.pieces |= piece::FAULT;
+            }
+            None => report_gpu_crash_piece_unavailable(
+                &W2107_FAULT_SITE,
+                "fault",
+                "vkGetDeviceFaultInfoEXT did not resolve",
             ),
         }
     }
@@ -4593,6 +4656,13 @@ struct DeviceEnables {
     enable_buffer_marker: bool,
     /// Render rung GB: appends `VK_NV_device_diagnostic_checkpoints`. No feature struct.
     enable_checkpoints: bool,
+    /// Render rung GB: appends `VK_EXT_device_fault` and chains `VkPhysicalDeviceFaultFeaturesEXT`
+    /// with `deviceFault` set. A `pNext` feature bit and an entry point read only after a device
+    /// loss: an unarmed frame records nothing different.
+    enable_device_fault: bool,
+    /// Render rung GB: also sets `deviceFaultVendorBinary` — `true` only when the device reported
+    /// that bit, which is NOT implied by the extension (an iGPU here reports `deviceFault` alone).
+    enable_device_fault_vendor_binary: bool,
 }
 
 /// Every device extension name one boot can enable: 1 swapchain, 3 RT, 1 calibrated timestamps
@@ -4635,7 +4705,39 @@ fn device_extension_list(windowed: bool, e: &DeviceEnables) -> ([&'static CStr; 
         names[count] = VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME;
         count += 1;
     }
+    if e.enable_device_fault {
+        names[count] = VK_EXT_DEVICE_FAULT_EXTENSION_NAME;
+        count += 1;
+    }
     (names, count)
+}
+
+/// The fault features to request, from what the device reported: `deviceFault` only with the
+/// extension present and the bit supported, and `deviceFaultVendorBinary` only on top of that and
+/// with its OWN bit supported — requesting an unsupported feature bit is a hard `vkCreateDevice`
+/// failure (critique W4). Pure.
+fn fault_feature_enables(extension_present: bool, device_fault: bool, vendor_binary: bool) -> (bool, bool) {
+    let fault = extension_present && device_fault;
+    (fault, fault && vendor_binary)
+}
+
+/// A zeroed `VkPhysicalDeviceFaultFeaturesEXT` except for `s_type` — the shared template of the
+/// support query and the enable (the `zeroed_host_query_reset_features` reason).
+fn zeroed_fault_features() -> VkPhysicalDeviceFaultFeaturesExt {
+    VkPhysicalDeviceFaultFeaturesExt {
+        s_type: VkStructureType::PhysicalDeviceFaultFeaturesExt,
+        p_next: ptr::null_mut(),
+        device_fault: VK_FALSE,
+        device_fault_vendor_binary: VK_FALSE,
+    }
+}
+
+/// The enable node for the fault features `create_device` chains (render rung GB). Pure.
+fn fault_features_node(device_fault: bool, vendor_binary: bool) -> VkPhysicalDeviceFaultFeaturesExt {
+    let mut node = zeroed_fault_features();
+    node.device_fault = if device_fault { VK_TRUE } else { VK_FALSE };
+    node.device_fault_vendor_binary = if device_fault && vendor_binary { VK_TRUE } else { VK_FALSE };
+    node
 }
 
 fn create_device(
@@ -4650,6 +4752,8 @@ fn create_device(
         enable_ray_query,
         enable_vb_geometry_table,
         enable_host_query_reset,
+        enable_device_fault,
+        enable_device_fault_vendor_binary,
         ..
     } = enables;
     let _ = enable_ray_query; // read only on the hwrt arm below (silences the OFF build).
@@ -4804,8 +4908,17 @@ fn create_device(
     // descriptorIndexing → features13 → (hwrt only) rayQuery → accelerationStructure →
     // bufferDeviceAddress. Unlike the pre-T-dev chain, the head never changes shape
     // between builds — the RT sub-chain hangs off `features13.p_next` instead.
-    let p_next: *const c_void =
-        (&descriptor_indexing as *const VkPhysicalDeviceDescriptorIndexingFeatures).cast();
+    // Render rung GB: the fault features node is spliced in at the HEAD, in front of the
+    // descriptor-indexing struct, only when the fault piece is enabled — the rest of the chain is
+    // untouched, and with the piece off the walk order is byte-identical to before.
+    let mut fault_features = fault_features_node(enable_device_fault, enable_device_fault_vendor_binary);
+    let p_next: *const c_void = if enable_device_fault {
+        fault_features.p_next =
+            (&descriptor_indexing as *const VkPhysicalDeviceDescriptorIndexingFeatures).cast::<c_void>() as *mut c_void;
+        (&fault_features as *const VkPhysicalDeviceFaultFeaturesExt).cast()
+    } else {
+        (&descriptor_indexing as *const VkPhysicalDeviceDescriptorIndexingFeatures).cast()
+    };
 
     // Core (Vulkan 1.0) features passed via `p_enabled_features`, NOT `pNext` (the two
     // are mutually exclusive — VUID-VkDeviceCreateInfo-pNext-00373). Exactly the
@@ -5219,6 +5332,8 @@ mod tests {
             (&super::W2107_LABELS_SITE, "labels"),
             (&super::W2107_MARKERS_SITE, "markers"),
             (&super::W2107_CHECKPOINTS_SITE, "checkpoints"),
+            (&super::W2107_FAULT_SITE, "fault"),
+            (&super::W2107_FAULT_BINARY_SITE, "fault vendor binary"),
         ];
         for (site, _) in sites {
             site.reset();
@@ -5274,14 +5389,16 @@ mod tests {
         }
     }
 
-    fn enables(calibrated: bool, ray_query: bool, marker: bool, checkpoints: bool) -> super::DeviceEnables {
+    fn enables(calibrated: bool, ray_query: bool, gb: bool) -> super::DeviceEnables {
         super::DeviceEnables {
             enable_ray_query: ray_query,
             enable_vb_geometry_table: false,
             enable_host_query_reset: false,
             enable_calibrated_timestamps: calibrated,
-            enable_buffer_marker: marker,
-            enable_checkpoints: checkpoints,
+            enable_buffer_marker: gb,
+            enable_checkpoints: gb,
+            enable_device_fault: gb,
+            enable_device_fault_vendor_binary: gb,
         }
     }
 
@@ -5310,15 +5427,44 @@ mod tests {
                 want.push(super::VK_KHR_RAY_QUERY_EXTENSION_NAME);
                 want.push(super::VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
             }
-            let (names, count) = super::device_extension_list(windowed, &enables(calibrated, ray_query, false, false));
+            let (names, count) = super::device_extension_list(windowed, &enables(calibrated, ray_query, false));
             assert_eq!(&names[..count], &want[..], "GB off changed the device extensions");
 
-            let (on, on_count) = super::device_extension_list(windowed, &enables(calibrated, ray_query, true, true));
+            let (on, on_count) = super::device_extension_list(windowed, &enables(calibrated, ray_query, true));
             assert_eq!(&on[..count], &want[..], "GB on moved a pre-GB device extension");
             assert_eq!(
                 &on[count..on_count],
-                &[super::VK_AMD_BUFFER_MARKER_EXTENSION_NAME, super::VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME],
+                &[
+                    super::VK_AMD_BUFFER_MARKER_EXTENSION_NAME,
+                    super::VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME,
+                    super::VK_EXT_DEVICE_FAULT_EXTENSION_NAME,
+                ],
             );
+        }
+    }
+
+    /// Critique W4: `deviceFaultVendorBinary` is requested only when the device reported THAT
+    /// bit — an iGPU here reports `deviceFault = true, deviceFaultVendorBinary = false`, and
+    /// requesting the second would fail `vkCreateDevice` on every armed level.
+    ///
+    /// RED: derive the vendor-binary enable from the extension's presence and the node carries
+    /// the bit on the iGPU's mask.
+    #[test]
+    fn the_fault_node_never_requests_an_unsupported_vendor_binary() {
+        use crate::ffi::{VK_FALSE, VK_TRUE};
+        // (extension present, deviceFault, deviceFaultVendorBinary) -> (fault, vendor binary)
+        let rows = [
+            ((true, true, true), (true, true)),   // the RTX 5080
+            ((true, true, false), (true, false)), // the AMD iGPU
+            ((true, false, true), (false, false)),
+            ((false, true, true), (false, false)),
+        ];
+        for ((present, fault, binary), want) in rows {
+            let got = super::fault_feature_enables(present, fault, binary);
+            assert_eq!(got, want, "enables for present={present} fault={fault} binary={binary}");
+            let node = super::fault_features_node(got.0, got.1);
+            assert_eq!(node.device_fault, if want.0 { VK_TRUE } else { VK_FALSE });
+            assert_eq!(node.device_fault_vendor_binary, if want.1 { VK_TRUE } else { VK_FALSE });
         }
     }
 }
